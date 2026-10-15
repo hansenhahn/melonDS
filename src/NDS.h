@@ -314,6 +314,16 @@ public: // TODO: Encapsulate the rest of these members
     u32 KeyInput;
     u16 RCnt;
 
+    // Input injected by the control channel (MCP agent). Merged with the host
+    // input by the emu thread. AgentInputMask is active-low with the same layout
+    // as the frontend inputMask (1 = released, 0 = pressed). Default 0xFFF =
+    // nothing injected. When AgentMerge is false the host input is ignored.
+    u32 AgentInputMask = 0xFFF;
+    bool AgentMerge = true;
+    bool AgentTouching = false;
+    u16 AgentTouchX = 0;
+    u16 AgentTouchY = 0;
+
     // JIT MUST be declared before all other component objects,
     // as they'll need the memory that it allocates in its constructor!
     // (Reminder: C++ fields are initialized in the order they're declared,

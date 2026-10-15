@@ -325,6 +325,9 @@ LegacyEntry LegacyFile[] =
     {"GdbARM9BreakOnStartup", 1, "Gdb.ARM9.BreakOnStartup", true},
 #endif
 
+    {"ControlEnabled", 1, "Control.Enabled", false},
+    {"ControlSocket",  2, "Control.Socket", false},
+
     {"Camera0_InputType", 0, "DSi.Camera0.InputType", false},
     {"Camera0_ImagePath", 2, "DSi.Camera0.ImagePath", false},
     {"Camera0_CamDeviceName", 2, "DSi.Camera0.DeviceName", false},

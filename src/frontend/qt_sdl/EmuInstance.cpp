@@ -35,6 +35,7 @@
 #include "ArchiveUtil.h"
 #endif
 #include "EmuInstance.h"
+#include "ControlServer.h"
 #include "Config.h"
 #include "Platform.h"
 #include "Net.h"
@@ -143,6 +144,17 @@ EmuInstance::EmuInstance(int inst) : deleting(false),
 
     emuThread->start();
 
+    controlServer = new ControlServer(this);
+    if (globalCfg.GetBool("Control.Enabled"))
+    {
+        std::string sockpath = globalCfg.GetString("Control.Socket");
+        if (sockpath.empty()) sockpath = Platform::GetLocalFilePath("control.sock");
+        if (controlServer->start(sockpath))
+            Platform::Log(Platform::LogLevel::Info, "Control channel listening on %s\n", sockpath.c_str());
+        else
+            Platform::Log(Platform::LogLevel::Error, "Failed to start control channel on %s\n", sockpath.c_str());
+    }
+
     // if any extra windows were saved as enabled, open them
     for (int i = 1; i < kMaxWindows; i++)
     {
@@ -157,6 +169,9 @@ EmuInstance::~EmuInstance()
 {
     deleting = true;
     deleteAllWindows();
+
+    delete controlServer;
+    controlServer = nullptr;
 
     emuThread->emuExit();
     emuThread->wait();
