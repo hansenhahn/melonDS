@@ -23,6 +23,7 @@
 #include <string>
 #include <memory>
 #include <variant>
+#include <functional>
 
 #include "types.h"
 #include "Savestate.h"
@@ -114,6 +115,10 @@ public:
     std::unique_ptr<CartCommon> EjectCart() noexcept;
 
     void SetCPUSelect(u32 sel);
+
+    // Optional hook for the cart read trace. Called on the emulation thread at
+    // the start of a ROM data-read transfer with (address, length, command).
+    std::function<void(u32 addr, u32 len, u8 cmd)> OnROMRead;
 
     // power control, for DSi
     void SetPowerState(u8 power);

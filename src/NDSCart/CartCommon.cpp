@@ -303,6 +303,14 @@ u32 CartCommon::ROMCommandReceive()
     return 0;
 }
 
+bool CartCommon::IsROMReadCommand() const
+{
+    if (CmdEncMode == 0) return ROMCmd[0] == 0x00;
+    if (CmdEncMode == 1) return (ROMCmd[0] & 0xF0) == 0x20;
+    if (CmdEncMode == 2) return ROMCmd[0] == 0xB7;
+    return false;
+}
+
 const NDSBanner* CartCommon::Banner() const
 {
     const NDSHeader& header = GetHeader();
