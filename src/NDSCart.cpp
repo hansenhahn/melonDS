@@ -795,7 +795,11 @@ void NDSCartSlot::Interface::WriteROMCnt(u32 val, u32 mask)
            datasize);*/
 
     if (Parent.CartActive && Parent.CPUSelect == Num)
+    {
         Parent.Cart->ROMCommandStart(Parent, ROMCommand);
+        if (Parent.OnROMRead && Parent.Cart->IsROMReadCommand())
+            Parent.OnROMRead(Parent.Cart->GetROMAddr(), ROMTransferLen, ROMCommand[0]);
+    }
 
     // reset the FIFO
     ROMDataPosCPU = 0;

@@ -61,6 +61,19 @@ private:
         long long streamEndAtMs = -1;  // -1 = until count
         std::string streamScreens;
         std::string streamFormat;
+
+        // cart read trace subscription
+        bool cartTrace = false;
+        int cartBatch = 256;
+        int cartTimeoutMs = 100;
+        int cartEventFd = -1;
+    };
+
+    struct CartRead
+    {
+        uint32_t addr;
+        uint32_t len;
+        uint8_t cmd;
     };
 
     void acceptLoop();
@@ -73,6 +86,12 @@ private:
 
     // Sends one streamed frame (event.frame notification + binary frame).
     void sendStreamSample(Client* client);
+
+    // Cart read trace: called on the emu thread at each read transfer.
+    void onCartRead(uint32_t addr, uint32_t len, uint8_t cmd);
+    // Drains the trace buffer and sends a batch (event.cart) to the client.
+    void flushCart(Client* client);
+    void stopCartTrace(Client* client);
 
     // Requests a capture from the emu thread and waits for it. Returns false
     // (with err set) if the framebuffer is unavailable (e.g. OpenGL renderer).
@@ -97,6 +116,14 @@ private:
     bool captureValid;
     int captureScreens;
     std::vector<uint8_t> captureBuf;
+
+    // cart read trace (single subscriber at a time)
+    std::mutex cartMutex;
+    std::vector<CartRead> cartBuf;
+    bool cartOverflow;
+    bool cartActive;
+    int cartBatchN;
+    int cartEventFd;
 };
 
 #endif

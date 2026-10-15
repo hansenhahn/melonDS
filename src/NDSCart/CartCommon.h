@@ -88,6 +88,11 @@ public:
     [[nodiscard]] const u8* GetROM() const { return ROM.get(); }
     [[nodiscard]] u32 GetROMLength() const { return ROMLength; }
 
+    // For the cart read trace: current read address and whether the last ROM
+    // command is a data-read command.
+    [[nodiscard]] u32 GetROMAddr() const { return ROMAddr; }
+    [[nodiscard]] bool IsROMReadCommand() const;
+
 protected:
     u32 ROMRead32();
 

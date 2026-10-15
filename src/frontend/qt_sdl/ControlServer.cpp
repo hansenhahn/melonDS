@@ -31,6 +31,7 @@ using nlohmann::json;
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 #include <poll.h>
 #include <cerrno>
@@ -38,7 +39,8 @@ using nlohmann::json;
 #endif
 
 ControlServer::ControlServer(EmuInstance* inst) : instance(inst), listenFd(-1), running(false),
-    captureRequested(false), captureDone(false), captureValid(false), captureScreens(2)
+    captureRequested(false), captureDone(false), captureValid(false), captureScreens(2),
+    cartOverflow(false), cartActive(false), cartBatchN(256), cartEventFd(-1)
 {
 }
 
@@ -173,9 +175,22 @@ void ControlServer::clientLoop(Client* client)
             long long wait = client->streamNextAtMs - nowMs();
             timeout = (wait < 0) ? 0 : (int)wait;
         }
+        if (client->cartTrace)
+        {
+            int t = client->cartTimeoutMs;
+            timeout = (timeout < 0 || t < timeout) ? t : timeout;
+        }
 
-        struct pollfd pfd {fd, POLLIN, 0};
-        int pr = poll(&pfd, 1, timeout);
+        struct pollfd pfds[2];
+        int nfds = 1;
+        pfds[0] = {fd, POLLIN, 0};
+        if (client->cartTrace && client->cartEventFd >= 0)
+        {
+            pfds[1] = {client->cartEventFd, POLLIN, 0};
+            nfds = 2;
+        }
+
+        int pr = poll(pfds, nfds, timeout);
         if (pr < 0)
         {
             if (errno == EINTR) continue;
@@ -183,11 +198,22 @@ void ControlServer::clientLoop(Client* client)
         }
         if (pr == 0)
         {
-            // streaming: time for a sample
+            // streaming: time for a sample; cart trace: flush the pending batch
             if (client->streaming) sendStreamSample(client);
+            if (client->cartTrace) flushCart(client);
             continue;
         }
-        if (!(pfd.revents & POLLIN)) break;
+
+        // cart batch signal
+        if (nfds == 2 && (pfds[1].revents & POLLIN))
+        {
+            uint64_t v;
+            ssize_t r = read(client->cartEventFd, &v, sizeof(v));
+            (void)r;
+            flushCart(client);
+        }
+
+        if (!(pfds[0].revents & POLLIN)) continue;
 
         // read one message (headers, then body)
         size_t contentLength = 0;
@@ -212,6 +238,8 @@ void ControlServer::clientLoop(Client* client)
         if (!ReadExact(fd, &body[0], contentLength)) break;
         if (!handleMessage(client, body)) break;
     }
+
+    stopCartTrace(client);
 
     {
         std::lock_guard<std::mutex> lock(clientsMutex);
@@ -267,6 +295,67 @@ void ControlServer::sendStreamSample(Client* client)
         return;
     }
     client->streamNextAtMs = next;
+}
+
+// Runs on the emu thread. Appends the read (O(1)) and signals the subscriber's
+// eventfd when a full batch is reached. No JSON, no socket I/O here.
+void ControlServer::onCartRead(uint32_t addr, uint32_t len, uint8_t cmd)
+{
+    std::lock_guard<std::mutex> lk(cartMutex);
+    if (!cartActive) return;
+
+    cartBuf.push_back({addr, len, cmd});
+    if (cartBuf.size() >= 65536) cartOverflow = true;
+    if ((int)cartBuf.size() >= cartBatchN && cartEventFd >= 0)
+    {
+        uint64_t one = 1;
+        ssize_t r = write(cartEventFd, &one, sizeof(one));
+        (void)r;
+    }
+}
+
+// Runs on the subscriber's client thread. Drains the buffer and sends a batch.
+void ControlServer::flushCart(Client* client)
+{
+    std::vector<CartRead> batch;
+    bool overflow;
+    {
+        std::lock_guard<std::mutex> lk(cartMutex);
+        batch.swap(cartBuf);
+        overflow = cartOverflow;
+        cartOverflow = false;
+    }
+    if (batch.empty() && !overflow) return;
+
+    json reads = json::array();
+    for (const CartRead& r : batch)
+        reads.push_back({{"addr", r.addr}, {"len", r.len}, {"cmd", r.cmd}});
+
+    json note = {{"jsonrpc", "2.0"}, {"method", "event.cart"},
+                 {"params", {{"reads", reads}, {"count", batch.size()}, {"overflow", overflow}}}};
+    sendMessage(client, note.dump());
+}
+
+void ControlServer::stopCartTrace(Client* client)
+{
+    if (!client->cartTrace) return;
+
+    melonDS::NDS* nds = instance->getNDS();
+    if (nds) nds->NDSCartSlot.OnROMRead = nullptr;
+
+    {
+        std::lock_guard<std::mutex> lk(cartMutex);
+        cartActive = false;
+        cartEventFd = -1;
+        cartBuf.clear();
+        cartOverflow = false;
+    }
+    if (client->cartEventFd >= 0)
+    {
+        close(client->cartEventFd);
+        client->cartEventFd = -1;
+    }
+    client->cartTrace = false;
 }
 
 void ControlServer::sendMessage(Client* client, const std::string& body)
@@ -522,6 +611,44 @@ bool ControlServer::handleMessage(Client* client, const std::string& body)
         return ok({{"ok", true}, {"path", path}});
     }
 
+    if (method == "cart.trace.start")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+
+        int batch = params.value("batch", 256);
+        if (batch < 1) batch = 1;
+        int timeoutMs = params.value("timeout_ms", 100);
+        if (timeoutMs < 1) timeoutMs = 1;
+
+        {
+            std::lock_guard<std::mutex> lk(cartMutex);
+            if (cartActive) return fail(-32000, "cart trace already active");
+            cartActive = true;
+            cartBatchN = batch;
+            cartBuf.clear();
+            cartBuf.reserve(batch * 2);
+            cartOverflow = false;
+        }
+
+        client->cartTrace = true;
+        client->cartBatch = batch;
+        client->cartTimeoutMs = timeoutMs;
+        client->cartEventFd = eventfd(0, EFD_NONBLOCK);
+        {
+            std::lock_guard<std::mutex> lk(cartMutex);
+            cartEventFd = client->cartEventFd;
+        }
+
+        nds->NDSCartSlot.OnROMRead = [this](uint32_t a, uint32_t l, uint8_t c) { onCartRead(a, l, c); };
+        return ok({{"ok", true}, {"batch", batch}, {"timeout_ms", timeoutMs}});
+    }
+    if (method == "cart.trace.stop")
+    {
+        if (!client->cartTrace) return fail(-32000, "no cart trace active");
+        stopCartTrace(client);
+        return ok({{"ok", true}});
+    }
+
     return fail(-32601, "method not found");
 }
 
@@ -537,5 +664,8 @@ void ControlServer::sendBinary(Client*, const std::vector<uint8_t>&) {}
 void ControlServer::sendStreamSample(Client*) {}
 void ControlServer::serviceCapture() {}
 bool ControlServer::capture(int, const std::string&, std::vector<uint8_t>&, int&, int&, std::string&) { return false; }
+void ControlServer::onCartRead(uint32_t, uint32_t, uint8_t) {}
+void ControlServer::flushCart(Client*) {}
+void ControlServer::stopCartTrace(Client*) {}
 
 #endif // _WIN32
