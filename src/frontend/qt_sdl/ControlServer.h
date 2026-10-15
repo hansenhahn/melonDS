@@ -20,6 +20,8 @@
 #define CONTROLSERVER_H
 
 #include <atomic>
+#include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -29,7 +31,8 @@ class EmuInstance;
 
 // Control channel for external agents (MCP). Runs on its own thread and never
 // touches the emulation core directly: input is applied by the emu thread from
-// shared fields, and core operations are queued to the emu thread.
+// shared fields, screen capture is copied by the emu thread on demand, and core
+// operations are queued to the emu thread.
 class ControlServer
 {
 public:
@@ -39,10 +42,25 @@ public:
     bool start(const std::string& path);
     void stop();
 
+    // Runs on the emu thread (from a queued message). Copies the framebuffer
+    // into the staging buffer only when a capture was requested.
+    void serviceCapture();
+
 private:
     struct Client
     {
         int fd;
+        std::mutex writeMutex;
+
+        // screen capture streaming (screen.capture with every_ms)
+        bool streaming = false;
+        int streamEveryMs = 0;
+        int streamRemaining = -1;      // -1 = until duration
+        int streamSent = 0;
+        long long streamNextAtMs = 0;
+        long long streamEndAtMs = -1;  // -1 = until count
+        std::string streamScreens;
+        std::string streamFormat;
     };
 
     void acceptLoop();
@@ -51,6 +69,15 @@ private:
     // Returns true if the client should be kept alive.
     bool handleMessage(Client* client, const std::string& body);
     void sendMessage(Client* client, const std::string& body);
+    void sendBinary(Client* client, const std::vector<uint8_t>& data);
+
+    // Sends one streamed frame (event.frame notification + binary frame).
+    void sendStreamSample(Client* client);
+
+    // Requests a capture from the emu thread and waits for it. Returns false
+    // (with err set) if the framebuffer is unavailable (e.g. OpenGL renderer).
+    bool capture(int screens, const std::string& format,
+                 std::vector<uint8_t>& out, int& width, int& height, std::string& err);
 
     EmuInstance* instance;
 
@@ -61,6 +88,15 @@ private:
 
     std::mutex clientsMutex;
     std::vector<Client*> clients;
+
+    // screen capture handshake with the emu thread
+    std::mutex captureMutex;
+    std::condition_variable captureCv;
+    bool captureRequested;
+    bool captureDone;
+    bool captureValid;
+    int captureScreens;
+    std::vector<uint8_t> captureBuf;
 };
 
 #endif
