@@ -84,6 +84,8 @@ public:
         msg_ImportSavefile,
 
         msg_EnableCheats,
+
+        msg_ControlCapture,
     };
 
     struct Message

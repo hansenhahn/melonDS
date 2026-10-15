@@ -45,6 +45,7 @@
 #include "Platform.h"
 #include "LocalMP.h"
 #include "Config.h"
+#include "ControlServer.h"
 #include "RTC.h"
 #include "DSi.h"
 #include "DSi_I2C.h"
@@ -662,6 +663,11 @@ void EmuThread::handleMessages()
 
         case msg_EnableCheats:
             emuInstance->enableCheats(msg.param.value<bool>());
+            break;
+
+        case msg_ControlCapture:
+            if (emuInstance->controlServer)
+                emuInstance->controlServer->serviceCapture();
             break;
         }
 
