@@ -495,6 +495,33 @@ bool ControlServer::handleMessage(Client* client, const std::string& body)
         return true;
     }
 
+    if (method == "emu.pause")
+    {
+        instance->getEmuThread()->emuPause();
+        return ok({{"ok", true}});
+    }
+    if (method == "emu.resume")
+    {
+        instance->getEmuThread()->emuUnpause();
+        return ok({{"ok", true}});
+    }
+    if (method == "savestate.save" || method == "savestate.load")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+
+        int slot = params.value("slot", 0);
+        std::string path = params.value("path", std::string(""));
+        if (path.empty())
+            path = melonDS::Platform::GetLocalFilePath("savestate_" + std::to_string(slot) + ".sav");
+
+        QString qpath = QString::fromStdString(path);
+        int r = (method == "savestate.save")
+              ? instance->getEmuThread()->saveState(qpath)
+              : instance->getEmuThread()->loadState(qpath);
+        if (!r) return fail(-32000, "savestate operation failed");
+        return ok({{"ok", true}, {"path", path}});
+    }
+
     return fail(-32601, "method not found");
 }
 
