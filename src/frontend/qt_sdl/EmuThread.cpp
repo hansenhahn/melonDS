@@ -252,10 +252,21 @@ void EmuThread::run()
             }
 
             // process input and hotkeys
-            emuInstance->nds->SetKeyMask(emuInstance->inputMask);
+            // The agent's injected input (control channel) is merged with the
+            // host input so a human and the agent can drive the same instance.
+            // Active-low: AND means "pressed if either source presses it".
+            {
+                u32 agentMask = emuInstance->nds->AgentInputMask;
+                u32 keys = emuInstance->nds->AgentMerge
+                    ? (emuInstance->inputMask & agentMask)
+                    : agentMask;
+                emuInstance->nds->SetKeyMask(keys);
+            }
 
             if (emuInstance->isTouching)
                 emuInstance->nds->TouchScreen(emuInstance->touchX, emuInstance->touchY);
+            else if (emuInstance->nds->AgentTouching)
+                emuInstance->nds->TouchScreen(emuInstance->nds->AgentTouchX, emuInstance->nds->AgentTouchY);
             else
                 emuInstance->nds->ReleaseScreen();
 

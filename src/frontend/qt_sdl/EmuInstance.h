@@ -81,6 +81,8 @@ enum
 bool isRightModKey(QKeyEvent* event);
 int getEventKeyVal(QKeyEvent* event);
 
+class ControlServer;
+
 class EmuInstance
 {
 public:
@@ -266,6 +268,8 @@ private:
     int instanceID;
 
     EmuThread* emuThread;
+
+    ControlServer* controlServer;
 
     MainWindow* mainWindow;
     MainWindow* windowList[kMaxWindows];
