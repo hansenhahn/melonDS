@@ -33,6 +33,8 @@ using namespace melonDS;
 using Platform::Log;
 using Platform::LogLevel;
 
+std::function<void()> Gdb::HaltService;
+
 static int SocketSetBlocking(int fd, bool block)
 {
 #if MOCKTEST
@@ -513,6 +515,12 @@ StubState GdbStub::Enter(bool stay, TgtStatus stat, u32 arg, bool wait_for_conn)
 		bool has_conn = ConnFd > 0;
 
 		if (has_conn && !was_conn) stay = true;
+
+		// While the target is halted (waiting for gdb commands), let the
+		// frontend service pending control-channel work, and avoid a hard
+		// busy-loop.
+		if (stay && Gdb::HaltService) Gdb::HaltService();
+		if (st == StubState::None) Platform::Sleep(1000);
 
 		switch (st)
 		{
