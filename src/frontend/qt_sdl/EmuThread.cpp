@@ -44,6 +44,7 @@
 #include "Wifi.h"
 #include "Platform.h"
 #include "LocalMP.h"
+#include "debug/GdbStub.h"
 #include "Config.h"
 #include "ControlServer.h"
 #include "RTC.h"
@@ -106,6 +107,11 @@ void EmuThread::detachWindow(MainWindow* window)
 
 void EmuThread::run()
 {
+    // Let the gdb stub service pending control-channel work while it holds the
+    // CPU halted: otherwise the emu thread blocks inside the stub and control
+    // operations (capture, savestate, ...) time out whenever gdb is attached.
+    Gdb::HaltService = [this]{ handleMessages(); };
+
     Config::Table& globalCfg = emuInstance->getGlobalConfig();
     u32 mainScreenPos[3];
 

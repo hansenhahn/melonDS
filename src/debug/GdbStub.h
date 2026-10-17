@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 #include <sys/types.h>
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -15,6 +16,12 @@ namespace Gdb
 {
 
 using namespace melonDS;
+
+// Called from the stub's halt loop (on the emu thread) while the target is
+// stopped, so the frontend can service pending control-channel work. Set by the
+// frontend (EmuThread). Without it, the emu thread blocks inside the stub and
+// the control channel times out while gdb is attached.
+extern std::function<void()> HaltService;
 enum class TgtStatus
 {
 	NoEvent,
