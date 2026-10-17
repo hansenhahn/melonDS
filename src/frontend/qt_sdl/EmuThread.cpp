@@ -171,8 +171,6 @@ void EmuThread::run()
 
         if (emuStatus == emuStatus_Running || emuStatus == emuStatus_FrameStep)
         {
-            if (emuStatus == emuStatus_FrameStep) emuStatus = emuStatus_Paused;
-
             if (emuInstance->hotkeyPressed(HK_SolarSensorDecrease))
             {
                 int level = emuInstance->nds->GBACartSlot.SetInput(GBACart::Input_SolarSensorDown, true);
@@ -333,6 +331,20 @@ void EmuThread::run()
                 emuInstance->firmwareSave->CheckFlush();
 
             emuInstance->drawScreen();
+
+            // frame stepping: count down and stop at the vblank (framebuffer composed)
+            if (emuStatus == emuStatus_FrameStep)
+            {
+                frameStepCount--;
+                if (frameStepCount <= 0)
+                {
+                    frameStepMutex.lock();
+                    frameStepPending = false;
+                    frameStepDone.wakeAll();
+                    frameStepMutex.unlock();
+                    emuStatus = emuStatus_Paused;
+                }
+            }
 
 #ifdef MELONCAP
             MelonCap::Update();
@@ -548,6 +560,8 @@ void EmuThread::handleMessages()
 
         case msg_EmuFrameStep:
             emuStatus = emuStatus_FrameStep;
+            frameStepCount = msg.param.value<int>();
+            if (frameStepCount < 1) frameStepCount = 1;
             break;
 
         case msg_EmuReset:
@@ -763,6 +777,25 @@ void EmuThread::emuFrameStep()
         sendMessage(msg_EmuPause);
     sendMessage(msg_EmuFrameStep);
     waitAllMessages();
+}
+
+void EmuThread::emuStepFrames(int n)
+{
+    if (n < 1) n = 1;
+
+    {
+        QMutexLocker lock(&frameStepMutex);
+        frameStepPending = true;
+    }
+
+    if (emuPauseStack < emuPauseStackPauseThreshold)
+        sendMessage(msg_EmuPause);
+    sendMessage({.type = msg_EmuFrameStep, .param = n});
+    waitAllMessages();
+
+    QMutexLocker lock(&frameStepMutex);
+    while (frameStepPending)
+        frameStepDone.wait(&frameStepMutex);
 }
 
 void EmuThread::emuReset()

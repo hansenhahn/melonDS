@@ -113,6 +113,7 @@ public:
     void emuStop(bool external);
     void emuExit();
     void emuFrameStep();
+    void emuStepFrames(int n);
     void emuReset();
 
     int bootROM(const QStringList& filename, QString& errorstr);
@@ -190,6 +191,13 @@ private:
     QMutex msgMutex;
     QSemaphore msgSemaphore;
     QQueue<Message> msgQueue;
+
+    // frame stepping (emu.step_frame): the emu thread runs one frame per loop
+    // iteration until frameStepCount reaches 0, then signals frameStepDone.
+    int frameStepCount = 0;
+    bool frameStepPending = false;
+    QMutex frameStepMutex;
+    QWaitCondition frameStepDone;
 
     EmuInstance* emuInstance;
 

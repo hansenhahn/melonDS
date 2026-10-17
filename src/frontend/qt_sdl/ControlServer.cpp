@@ -594,6 +594,13 @@ bool ControlServer::handleMessage(Client* client, const std::string& body)
         instance->getEmuThread()->emuUnpause();
         return ok({{"ok", true}});
     }
+    if (method == "emu.step_frame")
+    {
+        int n = params.value("n", 1);
+        if (n < 1) n = 1;
+        instance->getEmuThread()->emuStepFrames(n);
+        return ok({{"ok", true}, {"frames", n}});
+    }
     if (method == "savestate.save" || method == "savestate.load")
     {
         if (!nds) return fail(-32000, "emulator not running");
