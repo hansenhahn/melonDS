@@ -185,22 +185,21 @@ ReadResult GdbStub::MsgRecv()
 #ifndef _WIN32
 		if (first) flag |= MSG_DONTWAIT;
 		ssize_t receivedNum = recv(ConnFd, &RecvBuffer[RecvBufferFilled], sizeof(RecvBuffer) - RecvBufferFilled, flag);
-		Log(LogLevel::Debug, "[GDB] receiving from stream %d\n", receivedNum);
 #else
 		// fuck windows
 		ssize_t receivedNum = recv(ConnFd, (char*)&RecvBuffer[RecvBufferFilled], sizeof(RecvBuffer) - RecvBufferFilled, flag);
 #endif
 #endif
 
-		if (receivedNum <= 0)
+		if (receivedNum == 0)
+			return ReadResult::Eof;
+		if (receivedNum < 0)
 		{
 			if (first) return ReadResult::NoPacket;
-			else
-			{
-				Log(LogLevel::Debug, "[GDB] recv() error %zi, errno=%d (%s)\n", receivedNum, errno, strerror(errno));
-				return ReadResult::Eof;
-			}
+			Log(LogLevel::Debug, "[GDB] recv() error %zi, errno=%d (%s)\n", receivedNum, errno, strerror(errno));
+			return ReadResult::Eof;
 		}
+		first = false;
 		RecvBufferFilled += static_cast<u32>(receivedNum); 
 
 		ReadResult result = ParseAndSetupPacket();

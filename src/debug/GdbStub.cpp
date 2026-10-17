@@ -262,11 +262,11 @@ StubState GdbStub::HandlePacket()
 	{
 		Stat = TgtStatus::BreakReq;
 		return StubState::Attach;
-	/*}
+	}
 	else if (r == ExecResult::Detached)
 	{
 		Stat = TgtStatus::None;
-		return StubState::Disconnect;*/
+		return StubState::Disconnect;
 	}
 	else if (r == ExecResult::Continue)
 	{
@@ -330,6 +330,12 @@ StubState GdbStub::Poll(bool wait)
 
 		Stat = TgtStatus::Running; // on connected
 		StatFlag = false;
+		// reset per-connection state so a new gdb session starts clean
+		// (otherwise 'QStartNoAckMode' from a previous session leaks as NoAck=true
+		//  and desyncs the next client -> "Packet instead of Ack")
+		NoAck = false;
+		RecvBufferFilled = 0;
+		Cmdlen = 0;
 	}
 
 	if (StatFlag)
