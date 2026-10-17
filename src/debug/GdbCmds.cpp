@@ -585,12 +585,10 @@ ExecResult GdbStub::Handle_Question(GdbStub* stub, const u8* cmd, ssize_t len)
 			switch (typ)
 			{
 			case 1:
-				stub->RespFmt("S%02X", GdbSignal::TRAP);
-				//stub->RespFmt("T%02Xhwbreak:"/*"%08X"*/";", GdbSignal::TRAP/*, arg*/);
+				stub->RespFmt("T%02Xhwbreak:%08X;", GdbSignal::TRAP, arg);
 				break;
 			case 2:
-				stub->RespFmt("S%02X", GdbSignal::TRAP);
-				//stub->RespFmt("T%02Xwatch:"/*"%08X"*/";", GdbSignal::TRAP/*, arg*/);
+				stub->RespFmt("T%02Xwatch:%08X;", GdbSignal::TRAP, arg);
 				break;
 			default:
 				stub->RespFmt("S%02X", GdbSignal::TRAP);
