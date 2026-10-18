@@ -794,16 +794,6 @@ bool ControlServer::handleMessage(Client* client, const std::string& body)
         return true;
     }
 
-    if (method == "emu.pause")
-    {
-        instance->getEmuThread()->emuPause();
-        return ok({{"ok", true}});
-    }
-    if (method == "emu.resume")
-    {
-        instance->getEmuThread()->emuUnpause();
-        return ok({{"ok", true}});
-    }
     if (method == "emu.step_frame")
     {
         int n = params.value("n", 1);
