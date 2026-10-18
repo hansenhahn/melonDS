@@ -295,6 +295,24 @@ StubState GdbStub::Poll(bool wait)
 {
 	int r;
 
+	// A debugger may (re)connect while a previous session is still open -- e.g. a
+	// client that did not detach cleanly, or a new agent taking over. Let the new
+	// connection replace the stale one, so a reconnect is never stuck behind it.
+#ifndef _WIN32
+	if (ConnFd > 0)
+	{
+		struct pollfd lpfd;
+		lpfd.fd = SockFd;
+		lpfd.events = POLLIN;
+		lpfd.revents = 0;
+		if (poll(&lpfd, 1, 0) > 0 && (lpfd.revents & POLLIN))
+		{
+			Log(LogLevel::Info, "[GDB] new connection; replacing the previous session\n");
+			Disconnect();
+		}
+	}
+#endif
+
 	if (ConnFd <= 0)
 	{
 		SocketSetBlocking(SockFd, wait);
