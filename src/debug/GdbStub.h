@@ -22,6 +22,12 @@ using namespace melonDS;
 // frontend (EmuThread). Without it, the emu thread blocks inside the stub and
 // the control channel times out while gdb is attached.
 extern std::function<void()> HaltService;
+
+// Predicate checked from the stub's halt loop: when it returns true, the stub
+// releases the CPU (returns) so the frontend can advance a frame-step. The
+// frontend sets it (EmuThread) to report "a step_frame is in progress". The stub
+// breaks back in when the step completes (via ARM::RequestGdbBreak).
+extern std::function<bool()> FrameStepRun;
 enum class TgtStatus
 {
 	NoEvent,

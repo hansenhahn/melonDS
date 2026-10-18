@@ -193,6 +193,9 @@ public:
     static const u32 ConditionTable[16];
 #ifdef GDBSTUB_ENABLED
     Gdb::GdbStub GdbStub;
+    // ask the stub to break on the next check (used by the frame-step to stop *in the
+    // stub*, i.e. the same "stopped" the debugger observes, instead of a separate pause)
+    void RequestGdbBreak() { BreakReq = true; }
 #endif
 
     melonDS::NDS& NDS;
