@@ -34,6 +34,7 @@ using Platform::Log;
 using Platform::LogLevel;
 
 std::function<void()> Gdb::HaltService;
+std::function<bool()> Gdb::FrameStepRun;
 
 static int SocketSetBlocking(int fd, bool block)
 {
@@ -520,6 +521,9 @@ StubState GdbStub::Enter(bool stay, TgtStatus stat, u32 arg, bool wait_for_conn)
 		// frontend service pending control-channel work, and avoid a hard
 		// busy-loop.
 		if (stay && Gdb::HaltService) Gdb::HaltService();
+		// a frame-step is in progress: release the CPU so the frontend can run the N
+		// frames (it breaks back into the stub when the step completes)
+		if (stay && Gdb::FrameStepRun && Gdb::FrameStepRun()) do_next = false;
 		if (st == StubState::None) Platform::Sleep(1000);
 
 		switch (st)

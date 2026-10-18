@@ -111,6 +111,9 @@ void EmuThread::run()
     // CPU halted: otherwise the emu thread blocks inside the stub and control
     // operations (capture, savestate, ...) time out whenever gdb is attached.
     Gdb::HaltService = [this]{ handleMessages(); };
+    // let the stub release the CPU while a frame-step is running (it breaks back in
+    // when the step completes) -- so step_frame works *with* the debugger attached
+    Gdb::FrameStepRun = [this]{ return frameStepPending; };
 
     Config::Table& globalCfg = emuInstance->getGlobalConfig();
     u32 mainScreenPos[3];
@@ -348,7 +351,21 @@ void EmuThread::run()
                     frameStepPending = false;
                     frameStepDone.wakeAll();
                     frameStepMutex.unlock();
-                    emuStatus = emuStatus_Paused;
+#ifdef GDBSTUB_ENABLED
+                    // With the debugger attached, stop *in the stub* (the same "stopped"
+                    // the debugger observes) instead of the control-channel pause, so the
+                    // frozen frame is inspectable and `continue` resumes it.
+                    melonDS::NDS* ndsStep = emuInstance->getNDS();
+                    if (ndsStep && (ndsStep->ARM9->GdbStub.IsConnected() ||
+                                    ndsStep->ARM7->GdbStub.IsConnected()))
+                    {
+                        emuStatus = emuStatus_Running;
+                        if (ndsStep->ARM9->GdbStub.IsConnected()) ndsStep->ARM9->RequestGdbBreak();
+                        if (ndsStep->ARM7->GdbStub.IsConnected()) ndsStep->ARM7->RequestGdbBreak();
+                    }
+                    else
+#endif
+                        emuStatus = emuStatus_Paused;
                 }
             }
 
@@ -794,7 +811,17 @@ void EmuThread::emuStepFrames(int n)
         frameStepPending = true;
     }
 
-    if (emuPauseStack < emuPauseStackPauseThreshold)
+#ifdef GDBSTUB_ENABLED
+    // With the debugger attached, do NOT pause: the step runs the frames and the stub
+    // halts at the end (the same "stopped" the debugger observes). Pausing here would
+    // leave the emulator paused *and* un-serviced by the stub.
+    melonDS::NDS* ndsDbg = emuInstance ? emuInstance->getNDS() : nullptr;
+    bool dbgAttached = ndsDbg &&
+        (ndsDbg->ARM9->GdbStub.IsConnected() || ndsDbg->ARM7->GdbStub.IsConnected());
+#else
+    bool dbgAttached = false;
+#endif
+    if (!dbgAttached && emuPauseStack < emuPauseStackPauseThreshold)
         sendMessage(msg_EmuPause);
     sendMessage({.type = msg_EmuFrameStep, .param = n});
     waitAllMessages();
