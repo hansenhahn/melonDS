@@ -66,6 +66,7 @@ void DMA::Reset()
     SrcAddr = 0;
     DstAddr = 0;
     Cnt = 0;
+    ProgramPc = 0;
 
     StartMode = 0;
     CurSrcAddr = 0;
@@ -114,6 +115,7 @@ void DMA::DoSavestate(Savestate* file)
 
 void DMA::WriteCnt(u32 val)
 {
+    ProgramPc = NDS.GetPC(CPU); // the PC programming this channel, for the DMA trace
     u32 oldcnt = Cnt;
     Cnt = val;
 
@@ -158,6 +160,10 @@ void DMA::WriteCnt(u32 val)
 void DMA::Start()
 {
     if (Running) return;
+
+    // DMA read trace: report the programmed transfer (O(1); no-op without a subscriber)
+    if (NDS.OnDmaTransfer)
+        NDS.OnDmaTransfer(CPU, Num, SrcAddr, DstAddr, Cnt, ProgramPc);
 
     if (!InProgress)
     {

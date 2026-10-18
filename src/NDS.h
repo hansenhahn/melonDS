@@ -458,6 +458,10 @@ public: // TODO: Encapsulate the rest of these members
 
     u32 GetPC(u32 cpu) const;
     u64 GetSysClockCycles(int num);
+
+    // Optional hook for the DMA transfer trace. Called on the emulation thread at the
+    // start of each DMA transfer with (cpu, channel, src, dst, cnt, programmer pc).
+    std::function<void(u32 cpu, u32 num, u32 src, u32 dst, u32 cnt, u32 pc)> OnDmaTransfer;
     void NocashPrint(u32 cpu, u32 addr, bool appendNewline = true);
 
     void MonitorARM9Jump(u32 addr);

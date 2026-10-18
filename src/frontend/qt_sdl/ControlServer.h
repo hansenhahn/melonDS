@@ -29,6 +29,49 @@
 
 class EmuInstance;
 
+// Bounded ring buffer for the traces: fixed capacity, O(1) push (no allocation on
+// the emulation thread), drops the oldest item on overflow and counts the drops.
+template <typename T>
+struct TraceRing
+{
+    std::vector<T> buf;
+    size_t head = 0;
+    size_t count = 0;
+    uint64_t dropped = 0;
+
+    void reset(size_t cap)
+    {
+        buf.assign(cap < 1 ? 1 : cap, T {});
+        head = 0;
+        count = 0;
+        dropped = 0;
+    }
+
+    size_t size() const { return count; }
+
+    void push(const T& item)
+    {
+        buf[head] = item;
+        head = (head + 1) % buf.size();
+        if (count < buf.size())
+            count++;
+        else
+            dropped++; // overwrote the oldest
+    }
+
+    // Copies the held items out, oldest first, and empties the ring.
+    void drain(std::vector<T>& out)
+    {
+        out.clear();
+        out.reserve(count);
+        const size_t start = (head + buf.size() - count) % buf.size();
+        for (size_t i = 0; i < count; i++)
+            out.push_back(buf[(start + i) % buf.size()]);
+        head = 0;
+        count = 0;
+    }
+};
+
 // Control channel for external agents (MCP). Runs on its own thread and never
 // touches the emulation core directly: input is applied by the emu thread from
 // shared fields, screen capture is copied by the emu thread on demand, and core
@@ -67,6 +110,12 @@ private:
         int cartBatch = 256;
         int cartTimeoutMs = 100;
         int cartEventFd = -1;
+
+        // DMA transfer trace subscription
+        bool dmaTrace = false;
+        int dmaBatch = 256;
+        int dmaTimeoutMs = 100;
+        int dmaEventFd = -1;
     };
 
     struct CartRead
@@ -74,6 +123,16 @@ private:
         uint32_t addr;
         uint32_t len;
         uint8_t cmd;
+    };
+
+    struct DmaEvent
+    {
+        uint32_t cpu;
+        uint32_t ch;
+        uint32_t src;
+        uint32_t dst;
+        uint32_t cnt;
+        uint32_t pc;
     };
 
     void acceptLoop();
@@ -92,6 +151,13 @@ private:
     // Drains the trace buffer and sends a batch (event.cart) to the client.
     void flushCart(Client* client);
     void stopCartTrace(Client* client);
+
+    // DMA transfer trace: called on the emu thread at each transfer start.
+    void onDmaTransfer(uint32_t cpu, uint32_t ch, uint32_t src, uint32_t dst,
+                       uint32_t cnt, uint32_t pc);
+    // Drains the trace buffer and sends a batch (event.dma) to the client.
+    void flushDma(Client* client);
+    void stopDmaTrace(Client* client);
 
     // Requests a capture from the emu thread and waits for it. Returns false
     // (with err set) if the framebuffer is unavailable (e.g. OpenGL renderer).
@@ -123,11 +189,17 @@ private:
 
     // cart read trace (single subscriber at a time)
     std::mutex cartMutex;
-    std::vector<CartRead> cartBuf;
-    bool cartOverflow;
+    TraceRing<CartRead> cartRing;
     bool cartActive;
     int cartBatchN;
     int cartEventFd;
+
+    // DMA transfer trace (single subscriber at a time)
+    std::mutex dmaMutex;
+    TraceRing<DmaEvent> dmaRing;
+    bool dmaActive;
+    int dmaBatchN;
+    int dmaEventFd;
 };
 
 #endif

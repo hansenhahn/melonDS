@@ -82,6 +82,8 @@ private:
     u32 CPU {};
     u32 Num {};
 
+    u32 ProgramPc {}; // PC that wrote Cnt (the programmer), for the DMA trace
+
     u32 StartMode {};
     u32 CurSrcAddr {};
     u32 CurDstAddr {};
