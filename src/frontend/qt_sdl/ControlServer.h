@@ -115,6 +115,10 @@ private:
     bool captureDone;
     bool captureValid;
     int captureScreens;
+    // when >= 0, serviceCapture re-renders the current frame filtered to one
+    // layer (engine 0/1, bit: bg0-3=0-3, obj=4, 3d=0) instead of just copying.
+    int captureLayerEngine = -1;
+    int captureLayerBit = 0;
     std::vector<uint8_t> captureBuf;
 
     // cart read trace (single subscriber at a time)

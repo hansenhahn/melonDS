@@ -96,15 +96,18 @@ void SoftRenderer::DrawScanline(u32 line)
 {
     u32 *dstA, *dstB;
     u32 dstoffset = 256 * line;
+    // composed output goes to the external scratch buffers when set, keeping the
+    // same screen index convention as Framebuffer[BackBuffer]
+    u32* const* fb = ExternalTarget[0] ? ExternalTarget : Framebuffer[BackBuffer];
     if (GPU.ScreenSwap)
     {
-        dstA = &Framebuffer[BackBuffer][0][dstoffset];
-        dstB = &Framebuffer[BackBuffer][1][dstoffset];
+        dstA = &fb[0][dstoffset];
+        dstB = &fb[1][dstoffset];
     }
     else
     {
-        dstA = &Framebuffer[BackBuffer][1][dstoffset];
-        dstB = &Framebuffer[BackBuffer][0][dstoffset];
+        dstA = &fb[1][dstoffset];
+        dstB = &fb[0][dstoffset];
     }
 
     // the position used for drawing operations is based on VCOUNT
@@ -450,6 +453,13 @@ bool SoftRenderer::GetFramebuffers(void** top, void** bottom)
     *top = Framebuffer[frontbuf][0];
     *bottom = Framebuffer[frontbuf][1];
     return true;
+}
+
+
+void SoftRenderer::SetExternalRenderTarget(u32* screen0, u32* screen1)
+{
+    ExternalTarget[0] = screen0;
+    ExternalTarget[1] = screen1;
 }
 
 }

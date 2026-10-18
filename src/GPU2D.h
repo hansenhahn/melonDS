@@ -72,6 +72,9 @@ public:
     u8 LayerEnable;         // layer enable - enable delayed by 2 scanlines
     u8 OBJEnable;           // OBJ enable (for OBJ rendering) - enable delayed by 1 scanline
     u8 ForcedBlank;         // forced blank - disable delayed by 2 scanlines
+    // debug: which layers to render (bit0-3 = BG0-3, bit4 = OBJ). 0x1F = all.
+    // used by the control channel's render_layer to draw a single layer.
+    u8 RenderMask = 0x1F;
     u16 BGCnt[4];
 
     u16 BGXPos[4];

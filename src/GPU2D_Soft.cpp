@@ -164,6 +164,7 @@ void SoftRenderer2D::DrawScanline(u32 line)
 #define DoDrawBG(type, line, num) \
     do \
     { \
+        if (!(GPU2D.RenderMask & (1<<num))) break; \
         if ((bgCnt[num] & (1<<6)) && (GPU2D.BGMosaicSize[0] > 0)) \
         { \
             DrawBG_##type<true>(line, num); \
@@ -177,6 +178,7 @@ void SoftRenderer2D::DrawScanline(u32 line)
 #define DoDrawBG_Large(line) \
     do \
     { \
+        if (!(GPU2D.RenderMask & (1<<2))) break; \
         if ((bgCnt[2] & (1<<6)) && (GPU2D.BGMosaicSize[0] > 0)) \
         { \
             DrawBG_Large<true>(line); \
@@ -370,6 +372,7 @@ void SoftRenderer2D::DrawPixel(u32* dst, u16 color, u32 flag)
 
 void SoftRenderer2D::DrawBG_3D()
 {
+    if (!(GPU2D.RenderMask & 1)) return; // debug: 3D (BG0) layer filtered out
     for (int i = 0; i < 256; i++)
     {
         u32 c = Parent.Output3D[i];
@@ -983,6 +986,7 @@ void SoftRenderer2D::ApplySpriteMosaicX()
 
 void SoftRenderer2D::InterleaveSprites(u32 prio)
 {
+    if (!(GPU2D.RenderMask & (1<<4))) return; // debug: OBJ layer filtered out
     u32 attrmask = (prio << 16) | OBJ_IsOpaque;
     u16* pal = (u16*)&GPU.Palette[GPU2D.Num ? 0x600 : 0x200];
     u16* extpal = GPU2D.GetOBJExtPal();
