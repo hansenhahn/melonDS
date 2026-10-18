@@ -340,6 +340,11 @@ public:
     virtual bool NeedsShaderCompile() { return false; }
     virtual void ShaderCompileStep(int& current, int& count) {}
 
+    // When set, software renderers do not block waiting for the threaded 3D
+    // renderer to produce scanlines. Used by the off-loop layer re-render: the
+    // last rendered 3D frame is already in the buffer and the CPU is paused.
+    bool ExternalScanlineRead = false;
+
 protected:
     melonDS::GPU& GPU;
     melonDS::GPU3D& GPU3D;

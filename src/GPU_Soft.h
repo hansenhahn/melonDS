@@ -51,11 +51,16 @@ public:
 
     bool GetFramebuffers(void** top, void** bottom) override;
 
+    void SetExternalRenderTarget(u32* screen0, u32* screen1) override;
+
 private:
     friend class SoftRenderer2D;
     friend class SoftRenderer3D;
 
     u32* Framebuffer[2][2];
+
+    // when set, composed scanlines are written here instead of Framebuffer
+    u32* ExternalTarget[2] = {nullptr, nullptr};
 
     u32* Output3D;
     alignas(8) u32 Output2D[2][256];

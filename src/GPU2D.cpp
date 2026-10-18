@@ -98,6 +98,7 @@ void GPU2D::Reset()
     DispCnt = 0;
     memset(DispCntLatch, 0, sizeof(DispCntLatch));
     LayerEnable = 0;
+    RenderMask = 0x1F;
     OBJEnable = 0;
     ForcedBlank = 0;
     memset(BGCnt, 0, 4*2);

@@ -850,6 +850,14 @@ public:
     virtual void Start3DRendering() { Rend3D->RenderFrame(); }
     virtual void Finish3DRendering() { Rend3D->FinishRendering(); }
     virtual void Restart3DRendering() { Rend3D->RestartFrame(); }
+    // see Renderer3D::ExternalScanlineRead
+    void Set3DExternalScanlineRead(bool v) { if (Rend3D) Rend3D->ExternalScanlineRead = v; }
+
+    // Software renderers: redirect the composed scanline output to caller-owned
+    // buffers (256x192 u32 each) instead of the live framebuffer. Used by the
+    // off-loop layer re-render so the displayed frame is never touched.
+    // Pass nullptr, nullptr to restore the normal framebuffer.
+    virtual void SetExternalRenderTarget(u32* screen0, u32* screen1) {}
 
     virtual void VBlank() = 0;
     virtual void VBlankEnd() = 0;

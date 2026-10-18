@@ -1813,7 +1813,7 @@ u32* SoftRenderer3D::GetLine(int line)
         return ScrolledLine;
     }
 
-    if (RenderThreadRunning.load(std::memory_order_relaxed))
+    if (RenderThreadRunning.load(std::memory_order_relaxed) && !ExternalScanlineRead)
     {
         if (line < 192)
             // We need a scanline, so let's wait for the render thread to finish it.

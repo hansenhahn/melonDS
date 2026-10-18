@@ -408,7 +408,73 @@ void ControlServer::serviceCapture()
     melonDS::NDS* nds = instance->getNDS();
     void* top = nullptr;
     void* bottom = nullptr;
-    if (nds && nds->GPU.GetFramebuffers(&top, &bottom))
+
+    // Optional isolated re-render of the current frame, filtered to one layer.
+    // The composed output goes to scratch buffers (the live framebuffer is never
+    // touched) and all GPU state is restored on scope exit.
+    if (nds && captureLayerEngine >= 0)
+    {
+        static uint32_t layerScratch[2][256 * 192];
+
+        melonDS::GPU& gpu = nds->GPU;
+        melonDS::Renderer& rend = gpu.GetRenderer();
+
+        // RAII: always restore renderer + GPU2D state, even on early return
+        struct LayerGuard
+        {
+            melonDS::GPU& gpu;
+            uint16_t savedVCount;
+            uint8_t savedA, savedB;
+            ~LayerGuard()
+            {
+                gpu.GetRenderer().SetExternalRenderTarget(nullptr, nullptr);
+                gpu.GetRenderer().Set3DExternalScanlineRead(false);
+                gpu.GPU2D_A.RenderMask = savedA;
+                gpu.GPU2D_B.RenderMask = savedB;
+                gpu.VCount = savedVCount;
+            }
+        } guard { gpu, gpu.VCount, gpu.GPU2D_A.RenderMask, gpu.GPU2D_B.RenderMask };
+
+        gpu.GPU2D_A.RenderMask = (captureLayerEngine == 0) ? (uint8_t)captureLayerBit : 0;
+        gpu.GPU2D_B.RenderMask = (captureLayerEngine == 1) ? (uint8_t)captureLayerBit : 0;
+
+        rend.SetExternalRenderTarget(layerScratch[0], layerScratch[1]);
+        // the 3D render thread is idle while paused, so don't block waiting for it:
+        // the last rendered 3D frame is already in its buffer.
+        rend.Set3DExternalScanlineRead(true);
+
+        // reset pass (mirrors StartHBlank at VCount==262): latch regs w/ resetregs=true
+        // and pre-render sprites for line 0
+        gpu.VCount = 262;
+        gpu.GPU2D_A.UpdateRegistersPreDraw(true);
+        gpu.GPU2D_B.UpdateRegistersPreDraw(true);
+        rend.DrawSprites(0);
+        gpu.GPU2D_A.UpdateRegistersPostDraw(true);
+        gpu.GPU2D_B.UpdateRegistersPostDraw(true);
+
+        for (uint32_t line = 0; line < 192; line++)
+        {
+            gpu.VCount = line;                             // StartScanline
+            gpu.GPU2D_A.UpdateWindows(line);
+            gpu.GPU2D_B.UpdateWindows(line);
+            gpu.GPU2D_A.UpdateRegistersPreDraw(false);     // StartHBlank
+            gpu.GPU2D_B.UpdateRegistersPreDraw(false);
+            rend.DrawScanline(line);
+            if (line < 191)
+                rend.DrawSprites(line + 1);
+            gpu.GPU2D_A.UpdateRegistersPostDraw(false);
+            gpu.GPU2D_B.UpdateRegistersPostDraw(false);
+        }
+
+        top = layerScratch[0];
+        bottom = layerScratch[1];
+    }
+    else if (nds)
+    {
+        nds->GPU.GetFramebuffers(&top, &bottom);
+    }
+
+    if (top && bottom)
     {
         const size_t frameSize = 256 * 192 * 4;
         if (captureScreens == 2)
@@ -577,6 +643,64 @@ bool ControlServer::handleMessage(Client* client, const std::string& body)
         {
             json result = {{"binary", {{"bytes", buf.size()}, {"width", w}, {"height", h},
                                        {"screens", scr}, {"format", format}}}};
+            json resp = {{"jsonrpc", "2.0"}, {"id", id}, {"result", result}};
+            sendMessage(client, resp.dump());
+            sendBinary(client, buf);
+        }
+        return true;
+    }
+
+    if (method == "video.render_layer")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+
+        std::string eng = params.value("engine", std::string("A"));
+        std::string layer = params.value("layer", std::string("obj"));
+        std::string scr = params.value("screens", std::string("both"));
+        std::string format = params.value("format", std::string("rgba8"));
+
+        int engidx;
+        if (eng == "A" || eng == "a") engidx = 0;
+        else if (eng == "B" || eng == "b") engidx = 1;
+        else return fail(-32602, "engine must be 'A' or 'B'");
+
+        uint8_t bit;
+        if (layer == "bg0") bit = 1<<0;
+        else if (layer == "bg1") bit = 1<<1;
+        else if (layer == "bg2") bit = 1<<2;
+        else if (layer == "bg3") bit = 1<<3;
+        else if (layer == "obj") bit = 1<<4;
+        else if (layer == "3d") bit = 1<<0;
+        else return fail(-32602, "layer must be bg0..bg3/obj/3d");
+        if (layer == "3d" && engidx != 0)
+            return fail(-32602, "3D only exists on engine A");
+
+        int screens = (scr == "top") ? 0 : (scr == "bottom") ? 1 : 2;
+
+        // re-render the frozen frame: pause around it, then ALWAYS unpause, so the
+        // emulator's pause stack stays balanced (running stays running, paused
+        // stays paused) no matter the previous state.
+        instance->getEmuThread()->emuPause(false);
+        captureLayerEngine = engidx;
+        captureLayerBit = bit;
+
+        std::vector<uint8_t> buf;
+        int w = 0, h = 0;
+        std::string err;
+        bool okc = capture(screens, format, buf, w, h, err);
+
+        captureLayerEngine = -1;
+        captureLayerBit = 0;
+
+        instance->getEmuThread()->emuUnpause(false);
+
+        if (!okc) return fail(-32000, err);
+
+        if (!isNotification)
+        {
+            json result = {{"binary", {{"bytes", buf.size()}, {"width", w}, {"height", h},
+                                       {"screens", scr}, {"format", format}}},
+                           {"engine", eng}, {"layer", layer}};
             json resp = {{"jsonrpc", "2.0"}, {"id", id}, {"result", result}};
             sendMessage(client, resp.dump());
             sendBinary(client, buf);
