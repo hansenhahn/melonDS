@@ -20,6 +20,7 @@
 
 #include "EmuInstance.h"
 #include "NDS.h"
+#include "Platform.h"
 
 #include "thirdparty/nlohmann/json.hpp"
 
@@ -44,7 +45,7 @@ static constexpr int TRACE_RING_CAP = 65536;
 ControlServer::ControlServer(EmuInstance* inst) : instance(inst), listenFd(-1), running(false),
     captureRequested(false), captureDone(false), captureValid(false), captureScreens(2),
     cartActive(false), cartBatchN(256), cartEventFd(-1),
-    dmaActive(false), dmaBatchN(256), dmaEventFd(-1)
+    dmaActive(false), dmaBatchN(256), dmaEventFd(-1), logTraffic(false)
 {
 }
 
@@ -94,6 +95,9 @@ static long long nowMs()
 bool ControlServer::start(const std::string& path)
 {
     if (running) return true;
+
+    // opt-in traffic logging (method/duration/errors); off by default, no per-frame cost
+    logTraffic = getenv("MELONDS_CONTROL_LOG") != nullptr;
 
     listenFd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (listenFd < 0) return false;
@@ -627,6 +631,22 @@ bool ControlServer::capture(int screens, const std::string& format,
 
 bool ControlServer::handleMessage(Client* client, const std::string& body)
 {
+    auto t0 = std::chrono::steady_clock::now();
+    bool ret = handleRequest(client, body);
+    if (logTraffic)
+    {
+        json req = json::parse(body, nullptr, false);
+        std::string method = req.is_object() ? req.value("method", "") : std::string("<bad>");
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - t0).count();
+        melonDS::Platform::Log(melonDS::Platform::LogLevel::Info, "[Control] %s dur=%lldus\n",
+                      method.c_str(), (long long)us);
+    }
+    return ret;
+}
+
+bool ControlServer::handleRequest(Client* client, const std::string& body)
+{
     json req = json::parse(body, nullptr, false);
     if (req.is_discarded() || !req.is_object())
     {
@@ -653,6 +673,9 @@ bool ControlServer::handleMessage(Client* client, const std::string& body)
         return true;
     };
     auto fail = [&](int code, const std::string& msg) {
+        if (logTraffic)
+            melonDS::Platform::Log(melonDS::Platform::LogLevel::Error, "[Control] %s error %d: %s\n",
+                          method.c_str(), code, msg.c_str());
         if (!isNotification)
         {
             json resp = {{"jsonrpc", "2.0"}, {"id", id},
