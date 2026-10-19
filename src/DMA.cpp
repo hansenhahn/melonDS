@@ -115,7 +115,12 @@ void DMA::DoSavestate(Savestate* file)
 
 void DMA::WriteCnt(u32 val)
 {
-    ProgramPc = NDS.GetPC(CPU); // the PC programming this channel, for the DMA trace
+    // Record the instruction that programmed the channel (the store), not R[15]
+    // after the CPU advanced it. Undo the fetch increment: ARM/halfword = 4, Thumb = 2.
+    {
+        const bool thumb = (CPU ? NDS.ARM7->CPSR : NDS.ARM9->CPSR) & 0x20;
+        ProgramPc = NDS.GetPC(CPU) - (thumb ? 2 : 4);
+    }
     u32 oldcnt = Cnt;
     Cnt = val;
 

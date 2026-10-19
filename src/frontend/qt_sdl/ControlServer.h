@@ -140,6 +140,8 @@ private:
 
     // Returns true if the client should be kept alive.
     bool handleMessage(Client* client, const std::string& body);
+    // Dispatch a parsed request (wrapped by handleMessage for logging).
+    bool handleRequest(Client* client, const std::string& body);
     void sendMessage(Client* client, const std::string& body);
     void sendBinary(Client* client, const std::vector<uint8_t>& data);
 
@@ -200,6 +202,9 @@ private:
     bool dmaActive;
     int dmaBatchN;
     int dmaEventFd;
+
+    // opt-in traffic logging (MELONDS_CONTROL_LOG); off by default
+    bool logTraffic;
 };
 
 #endif
