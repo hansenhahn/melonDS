@@ -75,6 +75,15 @@ void ARM::GdbCheckD(u32 addr, Gdb::WatchptKind kind)
         BreakReq = st == Gdb::StubState::Attach || st == Gdb::StubState::Break;
     }
 }
+void ARM::GdbCheckDmaWrite(u32 addr, u32 len, u32 pc)
+{
+    Gdb::StubState st = GdbStub.CheckDmaWatchpt(addr, len, pc, true, true);
+    if (st != Gdb::StubState::CheckNoHit)
+    {
+        IsSingleStep = st == Gdb::StubState::Step;
+        BreakReq = st == Gdb::StubState::Attach || st == Gdb::StubState::Break;
+    }
+}
 #else
 void ARM::GdbCheckA() {}
 void ARM::GdbCheckB() {}

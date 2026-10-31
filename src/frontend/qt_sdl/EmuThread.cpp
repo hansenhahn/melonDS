@@ -588,7 +588,7 @@ void EmuThread::handleMessages()
             break;
 
         case msg_EmuReset:
-            emuInstance->reset();
+            emuInstance->reset(msg.param.value<bool>());
 
             emuStatus = emuStatus_Running;
             emuPauseStack = emuPauseStackRunning;
@@ -831,9 +831,9 @@ void EmuThread::emuStepFrames(int n)
         frameStepDone.wait(&frameStepMutex);
 }
 
-void EmuThread::emuReset()
+void EmuThread::emuReset(bool reconfigure)
 {
-    sendMessage(msg_EmuReset);
+    sendMessage({.type = msg_EmuReset, .param = reconfigure});
     waitMessage();
 }
 

@@ -251,6 +251,12 @@ void NDS::SetGdbArgs(std::optional<GDBArgs> args) noexcept
     ARM7->SetGdbArgs(args);
     EnableGDBStub = args.has_value();
 }
+
+void NDS::GdbCheckDmaWrite(int cpu, u32 addr, u32 len, u32 pc)
+{
+    if (cpu == 0) ARM9->GdbCheckDmaWrite(addr, len, pc);
+    else          ARM7->GdbCheckDmaWrite(addr, len, pc);
+}
 #endif
 
 void NDS::InitTimings()

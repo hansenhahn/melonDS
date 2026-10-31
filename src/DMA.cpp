@@ -573,6 +573,11 @@ void DMA::Run9()
     bool burststart = (Running == 2);
     Running = 1;
 
+#ifdef GDBSTUB_ENABLED
+    u32 gdbWatchStart = CurDstAddr;
+    u32 gdbWatchUnits = IterCount;
+#endif
+
     if (!(Cnt & (1<<26)))
     {
         while (IterCount > 0 && !Stall)
@@ -610,6 +615,17 @@ void DMA::Run9()
 
     Executing = false;
     Stall = false;
+
+#ifdef GDBSTUB_ENABLED
+    if (IterCount < gdbWatchUnits)
+    {
+        u32 unit = (Cnt & (1<<26)) ? 4 : 2;
+        u32 lo = gdbWatchStart < CurDstAddr ? gdbWatchStart : CurDstAddr;
+        u32 hi = gdbWatchStart < CurDstAddr ? CurDstAddr : gdbWatchStart;
+        u32 span = (DstAddrInc == 0) ? unit : (hi - lo);
+        NDS.GdbCheckDmaWrite(0, lo, span, ProgramPc);
+    }
+#endif
 
     if (RemCount)
     {
@@ -649,6 +665,11 @@ void DMA::Run7()
     bool burststart = (Running == 2);
     Running = 1;
 
+#ifdef GDBSTUB_ENABLED
+    u32 gdbWatchStart = CurDstAddr;
+    u32 gdbWatchUnits = IterCount;
+#endif
+
     if (!(Cnt & (1<<26)))
     {
         while (IterCount > 0 && !Stall)
@@ -686,6 +707,17 @@ void DMA::Run7()
 
     Executing = false;
     Stall = false;
+
+#ifdef GDBSTUB_ENABLED
+    if (IterCount < gdbWatchUnits)
+    {
+        u32 unit = (Cnt & (1<<26)) ? 4 : 2;
+        u32 lo = gdbWatchStart < CurDstAddr ? gdbWatchStart : CurDstAddr;
+        u32 hi = gdbWatchStart < CurDstAddr ? CurDstAddr : gdbWatchStart;
+        u32 span = (DstAddrInc == 0) ? unit : (hi - lo);
+        NDS.GdbCheckDmaWrite(1, lo, span, ProgramPc);
+    }
+#endif
 
     if (RemCount)
     {

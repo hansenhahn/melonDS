@@ -4,8 +4,11 @@
 
 #include <stddef.h>
 #include <sys/types.h>
+#include <atomic>
+#include <deque>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <vector>
 
 #include "../types.h"
@@ -135,6 +138,13 @@ public:
 		int kind;
 	};
 
+	struct HitRecord
+	{
+	public:
+		u32 pc, addr;
+		int kind; // 0=breakpoint, 2=write, 3=read, 4=access, 5=dma-write
+	};
+
 	GdbStub(StubCallbacks* cb);
 	~GdbStub();
 
@@ -156,6 +166,13 @@ public:
 
 	StubState CheckBkpt(u32 addr, bool enter, bool stay);
 	StubState CheckWatchpt(u32 addr, int kind, bool enter, bool stay);
+	StubState CheckDmaWatchpt(u32 addr, u32 len, u32 pc, bool enter, bool stay);
+
+	void StartHitLog(size_t capacity);
+	void StopHitLog();
+	void ClearHits();
+	std::vector<HitRecord> ReadHits(size_t& dropped);
+	bool IsHitLogEnabled() const { return HitLogOn.load(std::memory_order_relaxed); }
 
 #include "GdbCmds.h"
 
@@ -213,6 +230,13 @@ private:
 
 	std::map<u32, BpWp> BpList;
 	std::vector<BpWp> WpList;
+
+	void RecordHit(u32 pc, u32 addr, int kind);
+	std::mutex HitMutex;
+	std::deque<HitRecord> Hits;
+	size_t HitCapacity = 0;
+	size_t HitDropped = 0;
+	std::atomic<bool> HitLogOn{false};
 
 	static SubcmdHandler Handlers_v[];
 	static SubcmdHandler Handlers_q[];

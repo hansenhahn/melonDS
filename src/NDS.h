@@ -515,6 +515,7 @@ public: // TODO: Encapsulate the rest of these members
 
 #ifdef GDBSTUB_ENABLED
     void SetGdbArgs(std::optional<GDBArgs> args) noexcept;
+    void GdbCheckDmaWrite(int cpu, u32 addr, u32 len, u32 pc);
 #else
     void SetGdbArgs(std::optional<GDBArgs> args) noexcept {}
 #endif
