@@ -114,7 +114,7 @@ public:
     void emuExit();
     void emuFrameStep();
     void emuStepFrames(int n);
-    void emuReset();
+    void emuReset(bool reconfigure = true);
 
     int bootROM(const QStringList& filename, QString& errorstr);
     int bootFirmware(QString& errorstr);

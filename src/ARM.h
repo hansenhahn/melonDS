@@ -196,6 +196,7 @@ public:
     // ask the stub to break on the next check (used by the frame-step to stop *in the
     // stub*, i.e. the same "stopped" the debugger observes, instead of a separate pause)
     void RequestGdbBreak() { BreakReq = true; }
+    void GdbCheckDmaWrite(u32 addr, u32 len, u32 pc);
 #endif
 
     melonDS::NDS& NDS;

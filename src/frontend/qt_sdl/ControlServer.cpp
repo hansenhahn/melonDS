@@ -45,6 +45,16 @@ static constexpr int TRACE_RING_CAP = 65536;
 // Maximum bytes served by a single rom.read call (clients chunk larger reads).
 static constexpr int ROM_READ_MAX = 16 * 1024 * 1024;
 
+#ifdef GDBSTUB_ENABLED
+static Gdb::GdbStub* GetHitStub(melonDS::NDS* nds, const std::string& core)
+{
+    if (!nds) return nullptr;
+    if (core == "arm7") return &nds->ARM7->GdbStub;
+    if (core == "arm9") return &nds->ARM9->GdbStub;
+    return nullptr;
+}
+#endif
+
 ControlServer::ControlServer(EmuInstance* inst) : instance(inst), listenFd(-1), running(false),
     captureRequested(false), captureDone(false), captureValid(false), captureScreens(2),
     cartActive(false), cartBatchN(256), cartEventFd(-1),
@@ -827,6 +837,62 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
         instance->getEmuThread()->emuStepFrames(n);
         return ok({{"ok", true}, {"frames", n}});
     }
+    if (method == "emu.reset")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+        instance->getEmuThread()->emuReset(false);
+        return ok({{"ok", true}});
+    }
+#ifdef GDBSTUB_ENABLED
+    if (method.rfind("gdb.hits.", 0) == 0)
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+        const std::string core = params.value("core", std::string("arm9"));
+        Gdb::GdbStub* stub = GetHitStub(nds, core);
+        if (!stub) return fail(-32602, "core must be arm9 or arm7");
+
+        if (method == "gdb.hits.start")
+        {
+            int cap = params.value("capacity", 4096);
+            if (cap < 1) cap = 1;
+            if (cap > 65536) cap = 65536;
+            stub->StartHitLog((size_t)cap);
+            return ok({{"ok", true}, {"capacity", cap}});
+        }
+        if (method == "gdb.hits.stop")
+        {
+            stub->StopHitLog();
+            return ok({{"ok", true}});
+        }
+        if (method == "gdb.hits.clear")
+        {
+            stub->ClearHits();
+            return ok({{"ok", true}});
+        }
+        if (method == "gdb.hits.read")
+        {
+            size_t dropped = 0;
+            auto hits = stub->ReadHits(dropped);
+            json arr = json::array();
+            for (const auto& hit : hits)
+            {
+                const char* kind = "unknown";
+                switch (hit.kind)
+                {
+                case 0: kind = "breakpoint"; break;
+                case 2: kind = "write"; break;
+                case 3: kind = "read"; break;
+                case 4: kind = "access"; break;
+                case 5: kind = "dma-write"; break;
+                }
+                arr.push_back({{"pc", hit.pc}, {"addr", hit.addr}, {"kind", kind}});
+            }
+            return ok({{"count", arr.size()}, {"dropped", dropped}, {"hits", arr}});
+        }
+        return fail(-32601, "unknown gdb.hits method");
+    }
+#endif
+
     if (method == "savestate.save" || method == "savestate.load")
     {
         if (!nds) return fail(-32000, "emulator not running");

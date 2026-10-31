@@ -1420,9 +1420,9 @@ bool EmuInstance::updateConsole() noexcept
     return true;
 }
 
-void EmuInstance::reset()
+void EmuInstance::reset(bool reconfigure)
 {
-    updateConsole();
+    if (reconfigure) updateConsole();
 
     if (consoleType == 1) ejectGBACart();
 
