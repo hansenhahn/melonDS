@@ -42,6 +42,9 @@ using nlohmann::json;
 // Fixed default capacity of the trace rings (items dropped, oldest first, on overflow).
 static constexpr int TRACE_RING_CAP = 65536;
 
+// Maximum bytes served by a single rom.read call (clients chunk larger reads).
+static constexpr int ROM_READ_MAX = 16 * 1024 * 1024;
+
 ControlServer::ControlServer(EmuInstance* inst) : instance(inst), listenFd(-1), running(false),
     captureRequested(false), captureDone(false), captureValid(false), captureScreens(2),
     cartActive(false), cartBatchN(256), cartEventFd(-1),
@@ -839,6 +842,72 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
               : instance->getEmuThread()->loadState(qpath);
         if (!r) return fail(-32000, "savestate operation failed");
         return ok({{"ok", true}, {"path", path}});
+    }
+
+    if (method == "rom.info")
+    {
+        melonDS::NDSCart::CartCommon* cart = nds ? nds->GetNDSCart() : nullptr;
+        if (!cart)
+        {
+            std::lock_guard<std::mutex> lk(romMutex);
+            checksumCart = nullptr;
+            checksumName.clear();
+            checksumLength = 0;
+            checksumValue = 0;
+            return ok({{"loaded", false}});
+        }
+
+        const std::string name = instance->getROMName();
+        const uint32_t length = cart->GetROMLength();
+        uint32_t checksum;
+        {
+            std::lock_guard<std::mutex> lk(romMutex);
+            if (checksumCart != cart || checksumName != name || checksumLength != length)
+            {
+                checksumCart = cart;
+                checksumName = name;
+                checksumLength = length;
+                checksumValue = cart->Checksum();
+            }
+            checksum = checksumValue;
+        }
+
+        const melonDS::NDSHeader& header = cart->GetHeader();
+        return ok({{"loaded", true},
+                   {"name", name},
+                   {"path", instance->getROMPath()},
+                   {"size", length},
+                   {"gamecode", std::string(header.GameCode, 4)},
+                   {"checksum", checksum}});
+    }
+    if (method == "rom.read")
+    {
+        melonDS::NDSCart::CartCommon* cart = nds ? nds->GetNDSCart() : nullptr;
+        if (!cart) return fail(-32000, "no ROM loaded");
+
+        const int offset = params.value("offset", -1);
+        const int size = params.value("size", 0);
+        if (offset < 0 || size <= 0)
+            return fail(-32602, "offset must be >= 0 and size must be > 0");
+        if (size > ROM_READ_MAX)
+            return fail(-32602, "size exceeds the per-call limit");
+
+        const uint64_t end = (uint64_t)offset + (uint64_t)size;
+        if (end > (uint64_t)cart->GetROMLength())
+            return fail(-32602, "read out of ROM bounds");
+
+        std::vector<uint8_t> data((size_t)size);
+        memcpy(data.data(), cart->GetROM() + offset, (size_t)size);
+
+        if (!isNotification)
+        {
+            json result = {{"offset", offset}, {"size", size},
+                           {"binary", {{"bytes", data.size()}}}};
+            json resp = {{"jsonrpc", "2.0"}, {"id", id}, {"result", result}};
+            sendMessage(client, resp.dump());
+            sendBinary(client, data);
+        }
+        return true;
     }
 
     if (method == "cart.trace.start")

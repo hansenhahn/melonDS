@@ -21,6 +21,8 @@
 
 #include <SDL2/SDL.h>
 
+#include <mutex>
+
 #include "Platform.h"
 #include "main.h"
 #include "NDS.h"
@@ -93,6 +95,11 @@ public:
     int getConsoleType() { return consoleType; }
     EmuThread* getEmuThread() { return emuThread; }
     melonDS::NDS* getNDS() { return nds; }
+
+    /// @return The file name of the loaded NDS ROM (thread-safe).
+    std::string getROMName() const;
+    /// @return The full path of the loaded NDS ROM (thread-safe).
+    std::string getROMPath() const;
 
     MainWindow* getMainWindow() { return mainWindow; }
     int getNumWindows() { return numWindows; }
@@ -282,6 +289,7 @@ private:
     melonDS::NDS* nds;
 
     int cartType;
+    mutable std::mutex romPathMutex;
     std::string baseROMDir;
     std::string baseROMName;
     std::string baseAssetName;

@@ -200,6 +200,19 @@ std::string EmuInstance::instanceFileSuffix()
     return suffix;
 }
 
+std::string EmuInstance::getROMName() const
+{
+    std::lock_guard<std::mutex> lock(romPathMutex);
+    return baseROMName;
+}
+
+std::string EmuInstance::getROMPath() const
+{
+    std::lock_guard<std::mutex> lock(romPathMutex);
+    if (baseROMDir.empty()) return baseROMName;
+    return baseROMDir + '/' + baseROMName;
+}
+
 void EmuInstance::createWindow(int id)
 {
     if (numWindows >= kMaxWindows)
@@ -1891,9 +1904,12 @@ bool EmuInstance::loadROM(QStringList filepath, bool reset, QString& errorstr)
 
     ndsSave = nullptr;
 
-    baseROMDir = basepath;
-    baseROMName = romname;
-    baseAssetName = romname.substr(0, romname.rfind('.'));
+    {
+        std::lock_guard<std::mutex> lock(romPathMutex);
+        baseROMDir = basepath;
+        baseROMName = romname;
+        baseAssetName = romname.substr(0, romname.rfind('.'));
+    }
 
     u32 savelen = 0;
     std::unique_ptr<u8[]> savedata = nullptr;
@@ -2004,9 +2020,12 @@ void EmuInstance::ejectCart()
     }
 
     cartType = -1;
-    baseROMDir = "";
-    baseROMName = "";
-    baseAssetName = "";
+    {
+        std::lock_guard<std::mutex> lock(romPathMutex);
+        baseROMDir = "";
+        baseROMName = "";
+        baseAssetName = "";
+    }
 }
 
 bool EmuInstance::cartInserted()
