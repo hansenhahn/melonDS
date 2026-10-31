@@ -29,6 +29,8 @@
 
 class EmuInstance;
 
+namespace melonDS::NDSCart { class CartCommon; }
+
 // Bounded ring buffer for the traces: fixed capacity, O(1) push (no allocation on
 // the emulation thread), drops the oldest item on overflow and counts the drops.
 template <typename T>
@@ -202,6 +204,13 @@ private:
     bool dmaActive;
     int dmaBatchN;
     int dmaEventFd;
+
+    // ROM info: the checksum is computed once per loaded cart and cached by identity.
+    std::mutex romMutex;
+    const melonDS::NDSCart::CartCommon* checksumCart = nullptr;
+    std::string checksumName;
+    uint32_t checksumLength = 0;
+    uint32_t checksumValue = 0;
 
     // opt-in traffic logging (MELONDS_CONTROL_LOG); off by default
     bool logTraffic;
