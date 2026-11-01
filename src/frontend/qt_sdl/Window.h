@@ -129,6 +129,7 @@ private slots:
     void onCheatsDialogFinished(int res);
     void onROMInfo();
     void onRAMInfo();
+    void onOAMViewer();
     void onOpenTitleManager();
     void onMPNewInstance();
     void onLANStartHost();
@@ -253,6 +254,7 @@ public:
     QAction* actSetupCheats;
     QAction* actROMInfo;
     QAction* actRAMInfo;
+    QAction* actOAMViewer;
     QAction* actTitleManager;
     QAction* actMPNewInstance;
     QAction* actLANStartHost;
