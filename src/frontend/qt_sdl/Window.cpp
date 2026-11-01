@@ -57,6 +57,7 @@
 #include "InterfaceSettingsDialog.h"
 #include "ROMInfoDialog.h"
 #include "RAMInfoDialog.h"
+#include "OAMViewerDialog.h"
 #include "TitleManagerDialog.h"
 #include "PowerManagement/PowerManagementDialog.h"
 
@@ -405,6 +406,9 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
                 actRAMInfo = menu->addAction("RAM search");
                 connect(actRAMInfo, &QAction::triggered, this, &MainWindow::onRAMInfo);
 
+                actOAMViewer = menu->addAction("OAM viewer");
+                connect(actOAMViewer, &QAction::triggered, this, &MainWindow::onOAMViewer);
+
                 actTitleManager = menu->addAction("Manage DSi titles");
                 connect(actTitleManager, &QAction::triggered, this, &MainWindow::onOpenTitleManager);
             }
@@ -698,6 +702,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
 
         actROMInfo->setEnabled(false);
         actRAMInfo->setEnabled(false);
+        actOAMViewer->setEnabled(false);
 
         actScreenRotation[windowCfg.GetInt("ScreenRotation")]->setChecked(true);
 
@@ -1302,6 +1307,7 @@ void MainWindow::updateCartInserted(bool gba)
             win->actSetupCheats->setEnabled(inserted);
             win->actROMInfo->setEnabled(inserted);
             win->actRAMInfo->setEnabled(inserted);
+            win->actOAMViewer->setEnabled(inserted);
         });
     }
 }
@@ -1729,6 +1735,12 @@ void MainWindow::onROMInfo()
 void MainWindow::onRAMInfo()
 {
     RAMInfoDialog* dlg = RAMInfoDialog::openDlg(this);
+}
+
+void MainWindow::onOAMViewer()
+{
+    if (!emuInstance->getNDS()) return;
+    OAMViewerDialog* dlg = OAMViewerDialog::openDlg(this);
 }
 
 void MainWindow::onOpenTitleManager()
