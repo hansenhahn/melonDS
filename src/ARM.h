@@ -231,7 +231,7 @@ protected:
     void GdbCheckA();
     void GdbCheckB();
     void GdbCheckC();
-    void GdbCheckD(u32 addr, Gdb::WatchptKind kind);
+    void GdbCheckD(u32 addr, Gdb::WatchptKind kind, u32 width, u32 pc_fault);
 };
 
 class ARMv5 : public ARM

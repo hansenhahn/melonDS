@@ -634,7 +634,7 @@ void GdbStub::DelAllBpWp()
 	WpList.erase(WpList.begin(), WpList.end());
 }
 
-void GdbStub::RecordHit(u32 pc, u32 addr, int kind)
+void GdbStub::RecordHit(u32 pc, u32 pc_fault, u32 addr, u32 width, int kind, bool rmw)
 {
 	std::lock_guard<std::mutex> lk(HitMutex);
 	if (!HitLogOn.load(std::memory_order_relaxed) || HitCapacity == 0) return;
@@ -643,7 +643,7 @@ void GdbStub::RecordHit(u32 pc, u32 addr, int kind)
 		Hits.pop_front();
 		HitDropped++;
 	}
-	Hits.push_back({pc, addr, kind});
+	Hits.push_back({pc, pc_fault, addr, width, kind, rmw});
 }
 
 void GdbStub::StartHitLog(size_t capacity)
@@ -685,7 +685,7 @@ StubState GdbStub::CheckBkpt(u32 addr, bool enter, bool stay)
 
 	if (IsHitLogEnabled())
 	{
-		RecordHit(addr, addr, 0);
+		RecordHit(addr, addr, addr, 0, 0);
 		return StubState::CheckNoHit;
 	}
 
@@ -701,7 +701,7 @@ StubState GdbStub::CheckBkpt(u32 addr, bool enter, bool stay)
 		return StubState::None;
 	}
 }
-StubState GdbStub::CheckWatchpt(u32 addr, int kind, bool enter, bool stay)
+StubState GdbStub::CheckWatchpt(u32 addr, int kind, u32 width, u32 pc_fault, bool enter, bool stay)
 {
 	for (auto search = WpList.begin(); search != WpList.end(); ++search)
 	{
@@ -711,7 +711,7 @@ StubState GdbStub::CheckWatchpt(u32 addr, int kind, bool enter, bool stay)
 		{
 			if (IsHitLogEnabled())
 			{
-				RecordHit(Cb->ReadReg(Register::pc), addr, kind);
+				RecordHit(Cb->ReadReg(Register::pc), pc_fault, addr, width, kind, false);
 				return StubState::CheckNoHit;
 			}
 
@@ -747,7 +747,7 @@ StubState GdbStub::CheckDmaWatchpt(u32 addr, u32 len, u32 pc, bool enter, bool s
 
 		if (IsHitLogEnabled())
 		{
-			RecordHit(pc, search->addr, 5);
+			RecordHit(pc, pc, addr, len, 5, false);
 			return StubState::CheckNoHit;
 		}
 
