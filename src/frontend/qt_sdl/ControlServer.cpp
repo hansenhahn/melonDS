@@ -885,7 +885,9 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
                 case 4: kind = "access"; break;
                 case 5: kind = "dma-write"; break;
                 }
-                arr.push_back({{"pc", hit.pc}, {"addr", hit.addr}, {"kind", kind}});
+                arr.push_back({{"pc", hit.pc}, {"pc_fault", hit.pc_fault},
+                                 {"addr", hit.addr}, {"width", hit.width},
+                                 {"rmw", hit.rmw}, {"kind", kind}});
             }
             return ok({{"count", arr.size()}, {"dropped", dropped}, {"hits", arr}});
         }

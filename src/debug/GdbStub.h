@@ -141,8 +141,9 @@ public:
 	struct HitRecord
 	{
 	public:
-		u32 pc, addr;
+		u32 pc, pc_fault, addr, width;
 		int kind; // 0=breakpoint, 2=write, 3=read, 4=access, 5=dma-write
+		bool rmw;
 	};
 
 	GdbStub(StubCallbacks* cb);
@@ -165,7 +166,7 @@ public:
 	void DelAllBpWp();
 
 	StubState CheckBkpt(u32 addr, bool enter, bool stay);
-	StubState CheckWatchpt(u32 addr, int kind, bool enter, bool stay);
+	StubState CheckWatchpt(u32 addr, int kind, u32 width, u32 pc_fault, bool enter, bool stay);
 	StubState CheckDmaWatchpt(u32 addr, u32 len, u32 pc, bool enter, bool stay);
 
 	void StartHitLog(size_t capacity);
@@ -231,7 +232,7 @@ private:
 	std::map<u32, BpWp> BpList;
 	std::vector<BpWp> WpList;
 
-	void RecordHit(u32 pc, u32 addr, int kind);
+	void RecordHit(u32 pc, u32 pc_fault, u32 addr, u32 width, int kind, bool rmw=false);
 	std::mutex HitMutex;
 	std::deque<HitRecord> Hits;
 	size_t HitCapacity = 0;
