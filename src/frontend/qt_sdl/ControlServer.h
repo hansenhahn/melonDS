@@ -146,6 +146,17 @@ private:
         uint32_t fifo;
     };
 
+    struct OriginEvent
+    {
+        uint32_t dstLo;
+        uint32_t dstHi;
+        uint32_t src;
+        uint32_t len;
+        uint32_t pc;
+        uint32_t frame;
+        uint32_t kind; // 0 = DMA
+    };
+
     struct Gpu3DVertex
     {
         int32_t x, y, z, w;
@@ -270,6 +281,11 @@ private:
     std::mutex gxMutex;
     TraceRing<GXEvent> gxRing;
     bool gxActive = false;
+
+    // VRAM write-origin history (DMA; armed on demand)
+    std::mutex originMutex;
+    TraceRing<OriginEvent> originRing;
+    bool originActive = false;
 
     // ROM info: the checksum is computed once per loaded cart and cached by identity.
     std::mutex romMutex;
