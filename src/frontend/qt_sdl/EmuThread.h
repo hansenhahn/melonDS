@@ -86,6 +86,7 @@ public:
         msg_EnableCheats,
 
         msg_ControlCapture,
+        msg_EmuFrameCounter,
     };
 
     struct Message
@@ -113,7 +114,17 @@ public:
     void emuStop(bool external);
     void emuExit();
     void emuFrameStep();
-    void emuStepFrames(int n);
+    // Advances exactly n frames and stops. With snapshot=true, records the emu
+    // frame at which the 3D snapshot must be taken (the last frame of the step)
+    // so the caller can capture it atomically before the halt.
+    void emuStepFrames(int n, bool snapshot = false);
+    // Reads the frame counter on the emu thread (safe/consistent from any thread).
+    uint32_t emuFrameCounter();
+    // Frame targeted by the in-progress step snapshot (0 when not armed).
+    uint32_t frameStepSnapshotTarget() const
+    {
+        return frameStepSnapshotTargetFrame.load(std::memory_order_relaxed);
+    }
     void emuReset(bool reconfigure = true);
 
     int bootROM(const QStringList& filename, QString& errorstr);
@@ -124,6 +135,10 @@ public:
 
     int saveState(const QString& filename);
     int loadState(const QString& filename);
+    // Frame/PC observed on the emu thread right after the last savestate
+    // save/load (for metadata and round-trip verification).
+    uint32_t lastStateFrame() const { return msgSavedFrame; }
+    uint32_t lastStatePC() const { return msgSavedPC; }
     int undoStateLoad();
 
     int importSavefile(const QString& filename);
@@ -187,6 +202,9 @@ private:
 
     int msgResult = 0;
     QString msgError;
+    uint32_t msgFrameCounter = 0;
+    uint32_t msgSavedFrame = 0;
+    uint32_t msgSavedPC = 0;
 
     QMutex msgMutex;
     QSemaphore msgSemaphore;
@@ -198,6 +216,12 @@ private:
     bool frameStepPending = false;
     QMutex frameStepMutex;
     QWaitCondition frameStepDone;
+
+    // Set by the caller before queueing msg_EmuFrameStep (true = capture the 3D
+    // snapshot on the last frame). Consumed by the emu thread, which stores the
+    // absolute target frame; 0 means "not armed".
+    std::atomic<bool> frameStepSnapshotRequest{false};
+    std::atomic<uint32_t> frameStepSnapshotTargetFrame{0};
 
     EmuInstance* emuInstance;
 

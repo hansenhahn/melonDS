@@ -24,17 +24,26 @@
 
 #include "GPU3DTextureExport.h"
 
+#include "CRC32.h"
+
 #include "thirdparty/nlohmann/json.hpp"
 
 using nlohmann::json;
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
 
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/eventfd.h>
+#include <sys/file.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <poll.h>
 #include <cerrno>
@@ -107,6 +116,112 @@ static long long nowMs()
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+// Savestate metadata sidecar ("<state>.sav.re.json"): keeps the melonDS binary
+// format untouched while adding integrity/round-trip data and ownership.
+static std::string StateSidecarPath(const std::string& path)
+{
+    return path + ".re.json";
+}
+
+static bool ReadFileBytes(const std::string& path, std::vector<uint8_t>& out)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    f.seekg(0, std::ios::end);
+    const std::streamoff len = f.tellg();
+    if (len < 0) return false;
+    f.seekg(0, std::ios::beg);
+    out.resize((size_t)len);
+    if (len > 0 && !f.read((char*)out.data(), (std::streamsize)len)) return false;
+    return true;
+}
+
+static bool ReadJsonFile(const std::string& path, json& out)
+{
+    std::vector<uint8_t> data;
+    if (!ReadFileBytes(path, data)) return false;
+    try
+    {
+        out = json::parse(data.begin(), data.end());
+    }
+    catch (...)
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool WriteJsonAtomic(const std::string& path, const json& value)
+{
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        const std::string body = value.dump(2);
+        f.write(body.data(), (std::streamsize)body.size());
+        if (!f) return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    return !ec;
+}
+
+static bool StateFileDigest(const std::string& path, uint32_t& crc, uint64_t& size)
+{
+    std::vector<uint8_t> data;
+    if (!ReadFileBytes(path, data)) return false;
+    size = data.size();
+    crc = melonDS::CRC32(data.data(), (int)data.size(), 0);
+    return true;
+}
+
+// Restricts the named-state part to a safe filename component (no path tricks).
+static bool SanitizeStateName(const std::string& name, std::string& out)
+{
+    if (name.empty() || name.size() > 64) return false;
+    if (name == "." || name == "..") return false;
+    for (char c : name)
+    {
+        if (!(std::isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.'))
+            return false;
+    }
+    bool allDigits = true;
+    for (char c : name)
+        if (!std::isdigit((unsigned char)c)) { allDigits = false; break; }
+    if (allDigits) return false; // keep the UI numeric-slot namespace separate
+    out = name;
+    return true;
+}
+
+// Non-blocking exclusive lock held during validation + load (or save).
+class StateFileLock
+{
+public:
+    explicit StateFileLock(const std::string& path)
+    {
+        fd = open((path + ".lock").c_str(), O_CREAT | O_RDWR, 0600);
+        if (fd < 0) return;
+        if (flock(fd, LOCK_EX | LOCK_NB) != 0)
+        {
+            close(fd);
+            fd = -1;
+        }
+    }
+    ~StateFileLock()
+    {
+        if (fd >= 0)
+        {
+            flock(fd, LOCK_UN);
+            close(fd);
+        }
+    }
+    bool ok() const { return fd >= 0; }
+
+private:
+    int fd = -1;
+};
+
 
 // Human-readable GXFIFO command name (No$gba-style, lowercase).
 static const char* GXCommandName(uint32_t cmd)
@@ -564,17 +679,30 @@ void ControlServer::onVBlank()
 {
     std::unique_lock<std::mutex> lk(snapshotMutex);
     if (!snapshotPending) return;
+
+    melonDS::NDS* nds = instance->getNDS();
+    // NumFrames is incremented after the frame returns; +1 means "the frame
+    // being completed", which is the numbering a stopped step reports.
+    const uint32_t captureFrame = nds ? (nds->NumFrames + 1) : 0;
+    if (snapshotStepTarget)
+    {
+        EmuThread* thread = instance->getEmuThread();
+        const uint32_t target = thread ? thread->frameStepSnapshotTarget() : 0;
+        if (target == 0 || captureFrame < target)
+            return; // not the target frame yet: keep waiting for a later VBlank
+    }
+
     snapshotPending = false;
+    snapshotStepTarget = false;
 
     Gpu3DSnapshot s;
-    melonDS::NDS* nds = instance->getNDS();
     if (nds)
     {
         melonDS::GPU3D& g = nds->GPU.GPU3D;
         s.valid = true;
         s.geometryEnabled = g.GeometryEnabled;
         s.renderingEnabled = g.RenderingEnabled;
-        s.frame = nds->NumFrames;
+        s.frame = captureFrame;
         s.dispCnt = g.DispCnt;
         s.gxStat = g.GXStat;
         s.fifoCmd = g.CmdFIFO.Level();
@@ -639,7 +767,8 @@ void ControlServer::onVBlank()
         }
     }
 
-    snapshotData = std::move(s);
+    cachedSnapshot = std::move(s);
+    hasCachedSnapshot = cachedSnapshot.valid;
     snapshotReady = true;
     lk.unlock();
     snapshotCv.notify_all();
@@ -653,8 +782,8 @@ bool ControlServer::requestSnapshot(Gpu3DSnapshot& out, int timeoutMs)
     {
         std::lock_guard<std::mutex> lk(snapshotMutex);
         snapshotPending = true;
+        snapshotStepTarget = false;
         snapshotReady = false;
-        snapshotData = Gpu3DSnapshot{};
     }
 
     nds->OnVBlank = [this] { onVBlank(); };
@@ -667,8 +796,69 @@ bool ControlServer::requestSnapshot(Gpu3DSnapshot& out, int timeoutMs)
         return false;
     }
 
-    out = snapshotData;
+    out = cachedSnapshot;
     return out.valid;
+}
+
+void ControlServer::armStepSnapshot()
+{
+    melonDS::NDS* nds = instance->getNDS();
+    if (!nds) return;
+    {
+        std::lock_guard<std::mutex> lk(snapshotMutex);
+        snapshotPending = true;
+        snapshotStepTarget = true;
+        snapshotReady = false;
+    }
+    nds->OnVBlank = [this] { onVBlank(); };
+}
+
+bool ControlServer::isHalted()
+{
+    melonDS::NDS* nds = instance->getNDS();
+    if (!nds) return false;
+    EmuThread* thread = instance->getEmuThread();
+    if (thread && !thread->emuIsRunning()) return true;
+#ifdef GDBSTUB_ENABLED
+    return nds->ARM9->GdbStub.IsHalted() || nds->ARM7->GdbStub.IsHalted();
+#else
+    return false;
+#endif
+}
+
+bool ControlServer::snapshotForRequest(const std::string& source, Gpu3DSnapshot& out,
+                                       std::string& err)
+{
+    const std::string mode = source.empty() ? "auto" : source;
+
+    {
+        std::lock_guard<std::mutex> lk(snapshotMutex);
+        if (hasCachedSnapshot && mode != "fresh")
+        {
+            out = cachedSnapshot;
+            return true;
+        }
+    }
+
+    if (mode == "last")
+    {
+        err = "no cached 3D snapshot (use emu.step_frame(1, snapshot=true) or source=fresh)";
+        return false;
+    }
+
+    if (isHalted())
+    {
+        err = "3D snapshot requires the emulator running; use "
+              "emu.step_frame(1, snapshot=true) then source=last";
+        return false;
+    }
+
+    if (!requestSnapshot(out, 2000))
+    {
+        err = "3D snapshot timeout (emulator paused?)";
+        return false;
+    }
+    return true;
 }
 
 // Runs on the emu thread. Appends one GXFIFO entry (O(1)); the ring drops the
@@ -1060,17 +1250,54 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
         return true;
     }
 
+    if (method == "emu.status")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+        EmuThread* thread = instance->getEmuThread();
+        const uint32_t frame = thread ? thread->emuFrameCounter() : nds->NumFrames;
+        const bool halted = isHalted();
+
+        json snapshot = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(snapshotMutex);
+            if (hasCachedSnapshot)
+            {
+                const uint32_t snapFrame = cachedSnapshot.frame;
+                const uint32_t age = (frame >= snapFrame) ? (frame - snapFrame) : 0;
+                snapshot = {{"frame", snapFrame}, {"age_frames", age}, {"stale", age > 0}};
+            }
+        }
+        return ok({{"running", !halted}, {"halted", halted}, {"frame", frame},
+                   {"snapshot", snapshot}});
+    }
     if (method == "emu.step_frame")
     {
         int n = params.value("n", 1);
         if (n < 1) n = 1;
-        instance->getEmuThread()->emuStepFrames(n);
-        return ok({{"ok", true}, {"frames", n}});
+        const bool snapshot = params.value("snapshot", false);
+        EmuThread* thread = instance->getEmuThread();
+        if (snapshot) armStepSnapshot();
+        thread->emuStepFrames(n, snapshot);
+        lastStepFrame = nds ? nds->NumFrames : 0;
+
+        json result = {{"ok", true}, {"frames", n}, {"frame", nds ? nds->NumFrames : 0}};
+        if (snapshot)
+        {
+            std::lock_guard<std::mutex> lk(snapshotMutex);
+            // a step that never hit a VBlank (e.g. reset mid-step) leaves it pending
+            snapshotPending = false;
+            if (hasCachedSnapshot && cachedSnapshot.valid)
+                result["snapshot_frame"] = cachedSnapshot.frame;
+            else
+                result["snapshot_error"] = "no VBlank reached during the step";
+        }
+        return ok(result);
     }
     if (method == "emu.reset")
     {
         if (!nds) return fail(-32000, "emulator not running");
         instance->getEmuThread()->emuReset(false);
+        lastStepFrame = 0;
         return ok({{"ok", true}});
     }
 #ifdef GDBSTUB_ENABLED
@@ -1129,17 +1356,189 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
     {
         if (!nds) return fail(-32000, "emulator not running");
 
-        int slot = params.value("slot", 0);
-        std::string path = params.value("path", std::string(""));
-        if (path.empty())
-            path = melonDS::Platform::GetLocalFilePath("savestate_" + std::to_string(slot) + ".sav");
+        const bool isSave = (method == "savestate.save");
+        const std::string name = params.value("name", std::string(""));
+        const std::string owner = params.value("owner", std::string(""));
+        const std::string label = params.value("label", std::string(""));
+        const bool force = params.value("force", false);
 
-        QString qpath = QString::fromStdString(path);
-        int r = (method == "savestate.save")
-              ? instance->getEmuThread()->saveState(qpath)
-              : instance->getEmuThread()->loadState(qpath);
-        if (!r) return fail(-32000, "savestate operation failed");
-        return ok({{"ok", true}, {"path", path}});
+        std::string path = params.value("path", std::string(""));
+        if (!name.empty())
+        {
+            std::string safe;
+            if (!SanitizeStateName(name, safe))
+                return fail(-32602, "invalid savestate name (use [A-Za-z0-9._-], not numeric)");
+            path = melonDS::Platform::GetLocalFilePath("savestate_named_" + safe + ".sav");
+        }
+        else if (path.empty())
+        {
+            int slot = params.value("slot", 0);
+            path = melonDS::Platform::GetLocalFilePath("savestate_" + std::to_string(slot) + ".sav");
+        }
+
+        StateFileLock lock(path);
+        if (!lock.ok())
+            return fail(-32000, "savestate is locked by another writer");
+
+        const std::string sidecarPath = StateSidecarPath(path);
+        std::string gamecode;
+        if (melonDS::NDSCart::CartCommon* cart = nds->GetNDSCart())
+        {
+            const melonDS::NDSHeader& header = cart->GetHeader();
+            gamecode.assign(header.GameCode, sizeof(header.GameCode));
+            while (!gamecode.empty() && (gamecode.back() == '\0' || gamecode.back() == ' '))
+                gamecode.pop_back();
+        }
+
+        if (isSave)
+        {
+            const std::string tmp = path + ".tmp";
+            EmuThread* thread = instance->getEmuThread();
+            if (!thread->saveState(QString::fromStdString(tmp)))
+            {
+                std::error_code ec; std::filesystem::remove(tmp, ec);
+                return fail(-32000, "savestate save failed");
+            }
+
+            uint32_t crc = 0;
+            uint64_t size = 0;
+            if (!StateFileDigest(tmp, crc, size))
+            {
+                std::error_code ec; std::filesystem::remove(tmp, ec);
+                return fail(-32000, "savestate written but unreadable");
+            }
+            std::error_code ec;
+            std::filesystem::rename(tmp, path, ec);
+            if (ec)
+            {
+                std::error_code rm;
+                std::filesystem::remove(tmp, rm);
+                return fail(-32000, "savestate rename failed");
+            }
+
+            const uint32_t frame = thread->lastStateFrame();
+            const uint32_t pc = thread->lastStatePC();
+            const bool midFrame = isHalted() &&
+                (lastStepFrame == 0 || nds->NumFrames != lastStepFrame);
+            json meta = {
+                {"version", 1}, {"path", path}, {"gamecode", gamecode},
+                {"frame", frame}, {"pc", pc}, {"size", size}, {"crc32", crc},
+                {"created_at", (long long)std::time(nullptr)},
+                {"owner", owner}, {"label", label}, {"mid_frame", midFrame},
+            };
+            if (!WriteJsonAtomic(sidecarPath, meta))
+                return fail(-32000, "savestate saved but sidecar write failed");
+
+            json readback;
+            if (!ReadJsonFile(sidecarPath, readback)
+                || readback.value("crc32", 0u) != crc
+                || readback.value("size", (uint64_t)0) != size)
+                return fail(-32000, "savestate verification failed");
+
+            json result = meta;
+            result["ok"] = true;
+            result["verified"] = true;
+            if (midFrame)
+                result["hint"] = "saved while halted mid-frame; use emu_step_frame to stop at a frame boundary";
+            return ok(result);
+        }
+
+        // load: validate the file against its sidecar BEFORE touching the state
+        json meta;
+        const bool hasMeta = ReadJsonFile(sidecarPath, meta);
+        uint32_t curCrc = 0;
+        uint64_t curSize = 0;
+        if (!StateFileDigest(path, curCrc, curSize))
+            return fail(-32000, "savestate file missing or unreadable");
+
+        if (hasMeta)
+        {
+            if (meta.value("size", (uint64_t)0) != curSize
+                || meta.value("crc32", 0u) != curCrc)
+                return fail(-32000, "savestate file does not match its sidecar (corrupted or clobbered)");
+            const std::string metaGame = meta.value("gamecode", std::string(""));
+            if (!metaGame.empty() && !gamecode.empty() && metaGame != gamecode)
+                return fail(-32000, "savestate gamecode differs from the loaded ROM");
+            const std::string metaOwner = meta.value("owner", std::string(""));
+            if (!owner.empty() && !metaOwner.empty() && owner != metaOwner && !force)
+                return fail(-32000, "savestate belongs to another owner (use force=true)");
+        }
+
+        EmuThread* thread = instance->getEmuThread();
+        if (!thread->loadState(QString::fromStdString(path)))
+            return fail(-32000, "savestate load failed");
+
+        json result = {{"ok", true}, {"path", path}, {"verified", false}};
+        if (hasMeta)
+        {
+            const uint32_t frame = thread->lastStateFrame();
+            const uint32_t pc = thread->lastStatePC();
+            const uint32_t metaFrame = meta.value("frame", 0u);
+            const uint32_t metaPc = meta.value("pc", 0u);
+            const bool frameOk = frame == metaFrame;
+            const bool pcOk = metaPc == 0 || pc == metaPc;
+            result["verified"] = frameOk && pcOk;
+            result["frame"] = frame;
+            result["pc"] = pc;
+            if (!frameOk)
+                result["divergence"] = {{"field", "frame"}, {"expected", metaFrame}, {"actual", frame}};
+            else if (!pcOk)
+                result["divergence"] = {{"field", "pc"}, {"expected", metaPc}, {"actual", pc}};
+        }
+        else
+        {
+            result["warning"] = "savestate has no sidecar; loaded unverified";
+        }
+        return ok(result);
+    }
+
+    if (method == "savestate.list")
+    {
+        const std::string probe =
+            melonDS::Platform::GetLocalFilePath("savestate_probe.sav");
+        const std::filesystem::path dir = std::filesystem::path(probe).parent_path();
+        json states = json::array();
+        try
+        {
+            for (const auto& entry : std::filesystem::directory_iterator(dir))
+            {
+                if (!entry.is_regular_file()) continue;
+                const auto& p = entry.path();
+                if (p.extension() != ".sav") continue;
+
+                const std::string path = p.string();
+                json item = {{"path", path}, {"name", p.stem().string()},
+                             {"verified", false}, {"clobbered", false}};
+                json meta;
+                if (ReadJsonFile(StateSidecarPath(path), meta))
+                {
+                    for (auto it = meta.begin(); it != meta.end(); ++it)
+                        item[it.key()] = it.value();
+                    uint32_t crc = 0;
+                    uint64_t size = 0;
+                    if (StateFileDigest(path, crc, size)
+                        && size == meta.value("size", (uint64_t)0)
+                        && crc == meta.value("crc32", 0u))
+                    {
+                        item["verified"] = true;
+                    }
+                    else
+                    {
+                        item["clobbered"] = true;
+                    }
+                }
+                else
+                {
+                    item["warning"] = "no sidecar";
+                }
+                states.push_back(item);
+            }
+        }
+        catch (...)
+        {
+            return fail(-32000, "could not list savestates");
+        }
+        return ok({{"count", states.size()}, {"states", states}});
     }
 
     if (method == "rom.info")
@@ -1292,8 +1691,9 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
     if (method == "3d.state")
     {
         Gpu3DSnapshot s;
-        if (!requestSnapshot(s, 2000))
-            return fail(-32000, "3D snapshot timeout (emulator paused?)");
+        std::string snapErr;
+        if (!snapshotForRequest(params.value("source", std::string("auto")), s, snapErr))
+            return fail(-32000, snapErr);
 
         auto matrix = [](const int32_t* m) {
             json a = json::array();
@@ -1322,8 +1722,9 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
     if (method == "3d.polygons")
     {
         Gpu3DSnapshot s;
-        if (!requestSnapshot(s, 2000))
-            return fail(-32000, "3D snapshot timeout (emulator paused?)");
+        std::string snapErr;
+        if (!snapshotForRequest(params.value("source", std::string("auto")), s, snapErr))
+            return fail(-32000, snapErr);
 
         uint32_t maxItems = params.value("max_items", 512);
         if (maxItems < 1) maxItems = 1;
@@ -1364,8 +1765,9 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
     if (method == "3d.textures")
     {
         Gpu3DSnapshot s;
-        if (!requestSnapshot(s, 2000))
-            return fail(-32000, "3D snapshot timeout (emulator paused?)");
+        std::string snapErr;
+        if (!snapshotForRequest(params.value("source", std::string("auto")), s, snapErr))
+            return fail(-32000, snapErr);
 
         json list = json::array();
         for (size_t i = 0; i < s.textures.size(); i++)
@@ -1395,8 +1797,9 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
         {
             int index = params.value("index", 0);
             Gpu3DSnapshot s;
-            if (!requestSnapshot(s, 2000))
-                return fail(-32000, "3D snapshot timeout (emulator paused?)");
+            std::string snapErr;
+            if (!snapshotForRequest(params.value("source", std::string("auto")), s, snapErr))
+                return fail(-32000, snapErr);
             if (index < 0 || index >= (int)s.textures.size())
                 return fail(-32602, "texture index out of range");
             const uint64_t key = s.textures[index];
@@ -1437,8 +1840,9 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
         {
             int index = params.value("index", 0);
             Gpu3DSnapshot s;
-            if (!requestSnapshot(s, 2000))
-                return fail(-32000, "3D snapshot timeout (emulator paused?)");
+            std::string snapErr;
+            if (!snapshotForRequest(params.value("source", std::string("auto")), s, snapErr))
+                return fail(-32000, snapErr);
             if (index < 0 || index >= (int)s.textures.size())
                 return fail(-32602, "texture index out of range");
             const uint64_t key = s.textures[index];
@@ -1642,6 +2046,13 @@ void ControlServer::flushDma(Client*) {}
 void ControlServer::stopDmaTrace(Client*) {}
 void ControlServer::onVBlank() {}
 bool ControlServer::requestSnapshot(Gpu3DSnapshot&, int) { return false; }
+bool ControlServer::snapshotForRequest(const std::string&, Gpu3DSnapshot&, std::string& err)
+{
+    err = "control channel not supported on this platform";
+    return false;
+}
+void ControlServer::armStepSnapshot() {}
+bool ControlServer::isHalted() { return false; }
 void ControlServer::onGXCommand(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
 void ControlServer::stopGXTrace() {}
 

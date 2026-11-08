@@ -351,6 +351,8 @@ void EmuThread::run()
                     frameStepPending = false;
                     frameStepDone.wakeAll();
                     frameStepMutex.unlock();
+                    // the step is over; no VBlank will match this target anymore
+                    frameStepSnapshotTargetFrame.store(0, std::memory_order_relaxed);
 #ifdef GDBSTUB_ENABLED
                     // With the debugger attached, stop *in the stub* (the same "stopped"
                     // the debugger observes) instead of the control-channel pause, so the
@@ -585,6 +587,20 @@ void EmuThread::handleMessages()
             emuStatus = emuStatus_FrameStep;
             frameStepCount = msg.param.value<int>();
             if (frameStepCount < 1) frameStepCount = 1;
+            // Arm the 3D snapshot for the *last* frame of the step: the VBlank
+            // hook captures when NumFrames+1 reaches this absolute target.
+            if (frameStepSnapshotRequest.exchange(false, std::memory_order_relaxed))
+            {
+                melonDS::NDS* ndsStep = emuInstance ? emuInstance->getNDS() : nullptr;
+                if (ndsStep)
+                    frameStepSnapshotTargetFrame.store(ndsStep->NumFrames + (uint32_t)frameStepCount,
+                                                       std::memory_order_relaxed);
+            }
+            break;
+
+        case msg_EmuFrameCounter:
+            msgFrameCounter = (emuInstance && emuInstance->getNDS())
+                            ? emuInstance->getNDS()->NumFrames : 0;
             break;
 
         case msg_EmuReset:
@@ -667,10 +683,20 @@ void EmuThread::handleMessages()
 
         case msg_SaveState:
             msgResult = emuInstance->saveState(msg.param.value<QString>().toStdString());
+            if (emuInstance->getNDS())
+            {
+                msgSavedFrame = emuInstance->getNDS()->NumFrames;
+                msgSavedPC = emuInstance->getNDS()->ARM9->R[15];
+            }
             break;
 
         case msg_LoadState:
             msgResult = emuInstance->loadState(msg.param.value<QString>().toStdString());
+            if (emuInstance->getNDS())
+            {
+                msgSavedFrame = emuInstance->getNDS()->NumFrames;
+                msgSavedPC = emuInstance->getNDS()->ARM9->R[15];
+            }
             break;
 
         case msg_UndoStateLoad:
@@ -802,7 +828,7 @@ void EmuThread::emuFrameStep()
     waitAllMessages();
 }
 
-void EmuThread::emuStepFrames(int n)
+void EmuThread::emuStepFrames(int n, bool snapshot)
 {
     if (n < 1) n = 1;
 
@@ -810,6 +836,7 @@ void EmuThread::emuStepFrames(int n)
         QMutexLocker lock(&frameStepMutex);
         frameStepPending = true;
     }
+    frameStepSnapshotRequest.store(snapshot, std::memory_order_relaxed);
 
 #ifdef GDBSTUB_ENABLED
     // With the debugger attached, do NOT pause: the step runs the frames and the stub
@@ -829,6 +856,13 @@ void EmuThread::emuStepFrames(int n)
     QMutexLocker lock(&frameStepMutex);
     while (frameStepPending)
         frameStepDone.wait(&frameStepMutex);
+}
+
+uint32_t EmuThread::emuFrameCounter()
+{
+    sendMessage(msg_EmuFrameCounter);
+    waitMessage();
+    return msgFrameCounter;
 }
 
 void EmuThread::emuReset(bool reconfigure)
