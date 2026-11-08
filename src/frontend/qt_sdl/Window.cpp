@@ -58,6 +58,7 @@
 #include "ROMInfoDialog.h"
 #include "RAMInfoDialog.h"
 #include "OAMViewerDialog.h"
+#include "ViewerTabsDialog.h"
 #include "TitleManagerDialog.h"
 #include "PowerManagement/PowerManagementDialog.h"
 
@@ -406,7 +407,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
                 actRAMInfo = menu->addAction("RAM search");
                 connect(actRAMInfo, &QAction::triggered, this, &MainWindow::onRAMInfo);
 
-                actOAMViewer = menu->addAction("OAM viewer");
+                actOAMViewer = menu->addAction("Viewers");
                 connect(actOAMViewer, &QAction::triggered, this, &MainWindow::onOAMViewer);
 
                 actTitleManager = menu->addAction("Manage DSi titles");
@@ -1740,7 +1741,8 @@ void MainWindow::onRAMInfo()
 void MainWindow::onOAMViewer()
 {
     if (!emuInstance->getNDS()) return;
-    OAMViewerDialog* dlg = OAMViewerDialog::openDlg(this);
+    ViewerTabsDialog* dlg = ViewerTabsDialog::openDlg(this);
+    dlg->showTab(0);
 }
 
 void MainWindow::onOpenTitleManager()
