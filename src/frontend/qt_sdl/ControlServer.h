@@ -137,6 +137,52 @@ private:
         uint32_t pc;
     };
 
+    struct GXEvent
+    {
+        uint32_t cmd;
+        uint32_t param;
+        uint32_t pc;
+        uint32_t frame;
+        uint32_t fifo;
+    };
+
+    struct Gpu3DVertex
+    {
+        int32_t x, y, z, w;
+        uint8_t r, g, b;
+        int16_t u, v;
+    };
+
+    struct Gpu3DPoly
+    {
+        uint32_t attr;
+        uint32_t texParam;
+        uint32_t texPalette;
+        int32_t type;
+        uint32_t numVertices;
+        bool translucent;
+        Gpu3DVertex verts[10];
+    };
+
+    struct Gpu3DSnapshot
+    {
+        bool valid = false;
+        bool geometryEnabled = false;
+        bool renderingEnabled = false;
+        uint32_t frame = 0;
+        uint32_t dispCnt = 0;
+        uint32_t gxStat = 0;
+        uint32_t fifoCmd = 0, fifoPipe = 0, fifoStall = 0;
+        int32_t matrixMode = 0;
+        int32_t viewport[6] = {};
+        int32_t proj[16] = {}, pos[16] = {}, vec[16] = {}, tex[16] = {};
+        uint32_t fogColor = 0, fogOffset = 0;
+        uint32_t numVertices = 0, numPolygons = 0, renderPolygons = 0;
+        std::vector<Gpu3DPoly> polys;
+        // unique (texParam << 32 | texPalette)
+        std::vector<uint64_t> textures;
+    };
+
     void acceptLoop();
     void clientLoop(Client* client);
 
@@ -162,6 +208,14 @@ private:
     // Drains the trace buffer and sends a batch (event.dma) to the client.
     void flushDma(Client* client);
     void stopDmaTrace(Client* client);
+
+    // 3D snapshot: captured at the next VBlank (one-shot, on demand).
+    void onVBlank();
+    bool requestSnapshot(Gpu3DSnapshot& out, int timeoutMs = 2000);
+
+    // GXFIFO command trace: called on the emu thread for every enqueued entry.
+    void onGXCommand(uint32_t cmd, uint32_t param, uint32_t pc, uint32_t frame, uint32_t fifo);
+    void stopGXTrace();
 
     // Requests a capture from the emu thread and waits for it. Returns false
     // (with err set) if the framebuffer is unavailable (e.g. OpenGL renderer).
@@ -204,6 +258,18 @@ private:
     bool dmaActive;
     int dmaBatchN;
     int dmaEventFd;
+
+    // 3D snapshot (one-shot at VBlank)
+    std::mutex snapshotMutex;
+    std::condition_variable snapshotCv;
+    bool snapshotPending = false;
+    bool snapshotReady = false;
+    Gpu3DSnapshot snapshotData;
+
+    // GXFIFO command trace
+    std::mutex gxMutex;
+    TraceRing<GXEvent> gxRing;
+    bool gxActive = false;
 
     // ROM info: the checksum is computed once per loaded cart and cached by identity.
     std::mutex romMutex;

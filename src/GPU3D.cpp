@@ -2497,6 +2497,9 @@ void GPU3D::VBlank() noexcept
             FlushRequest = 0;
         }
     }
+
+    if (NDS.OnVBlank)
+        NDS.OnVBlank();
 }
 
 
@@ -2529,6 +2532,9 @@ void GPU3D::WriteToGXFIFO(u32 val) noexcept
             CmdFIFOEntry entry;
             entry.Command = CurCommand & 0xFF;
             entry.Param = val;
+            if (NDS.OnGXCommand && NDS.ARM9)
+                NDS.OnGXCommand(entry.Command, entry.Param, NDS.ARM9->R[15],
+                                NDS.NumFrames, CmdFIFO.Level());
             CmdFIFOWrite(entry);
         }
 

@@ -22,6 +22,8 @@
 #include "NDS.h"
 #include "Platform.h"
 
+#include "GPU3DTextureExport.h"
+
 #include "thirdparty/nlohmann/json.hpp"
 
 using nlohmann::json;
@@ -58,7 +60,7 @@ static Gdb::GdbStub* GetHitStub(melonDS::NDS* nds, const std::string& core)
 ControlServer::ControlServer(EmuInstance* inst) : instance(inst), listenFd(-1), running(false),
     captureRequested(false), captureDone(false), captureValid(false), captureScreens(2),
     cartActive(false), cartBatchN(256), cartEventFd(-1),
-    dmaActive(false), dmaBatchN(256), dmaEventFd(-1), logTraffic(false)
+    dmaActive(false), dmaBatchN(256), dmaEventFd(-1), gxActive(false), logTraffic(false)
 {
 }
 
@@ -103,6 +105,53 @@ static long long nowMs()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Human-readable GXFIFO command name (No$gba-style, lowercase).
+static const char* GXCommandName(uint32_t cmd)
+{
+    switch (cmd & 0xFF)
+    {
+    case 0x00: return "nop";
+    case 0x10: return "mtx_mode";
+    case 0x11: return "mtx_push";
+    case 0x12: return "mtx_pop";
+    case 0x13: return "mtx_store";
+    case 0x14: return "mtx_restore";
+    case 0x15: return "mtx_identity";
+    case 0x16: return "mtx_load_4x4";
+    case 0x17: return "mtx_load_4x3";
+    case 0x18: return "mtx_mult_4x4";
+    case 0x19: return "mtx_mult_4x3";
+    case 0x1A: return "mtx_mult_3x3";
+    case 0x1B: return "mtx_scale";
+    case 0x1C: return "mtx_trans";
+    case 0x20: return "color";
+    case 0x21: return "normal";
+    case 0x22: return "texcoord";
+    case 0x23: return "vtx_16";
+    case 0x24: return "vtx_10";
+    case 0x25: return "vtx_xy";
+    case 0x26: return "vtx_xz";
+    case 0x27: return "vtx_yz";
+    case 0x28: return "vtx_diff";
+    case 0x29: return "polygon_attr";
+    case 0x2A: return "teximage_param";
+    case 0x2B: return "pltt_base";
+    case 0x30: return "dif_amb";
+    case 0x31: return "spe_emi";
+    case 0x32: return "light_vector";
+    case 0x33: return "light_color";
+    case 0x34: return "shininess";
+    case 0x40: return "begin_vtxs";
+    case 0x41: return "end_vtxs";
+    case 0x50: return "swap_buffers";
+    case 0x60: return "viewport";
+    case 0x70: return "box_test";
+    case 0x71: return "pos_test";
+    case 0x72: return "vec_test";
+    default: return "cmd";
+    }
 }
 
 bool ControlServer::start(const std::string& path)
@@ -160,6 +209,17 @@ void ControlServer::stop()
     for (Client* c : clients)
         shutdown(c->fd, SHUT_RDWR);
     clients.clear();
+
+    melonDS::NDS* nds = instance->getNDS();
+    if (nds)
+    {
+        nds->OnVBlank = nullptr;
+        nds->OnGXCommand = nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> lk(snapshotMutex);
+        snapshotPending = false;
+    }
 
     if (!socketPath.empty()) unlink(socketPath.c_str());
 }
@@ -459,6 +519,139 @@ void ControlServer::stopDmaTrace(Client* client)
         client->dmaEventFd = -1;
     }
     client->dmaTrace = false;
+}
+
+// Runs on the emu thread at the end of VBlank, after RenderPolygonRAM was
+// finalized. Copies the completed frame once (only when a snapshot was requested).
+void ControlServer::onVBlank()
+{
+    std::unique_lock<std::mutex> lk(snapshotMutex);
+    if (!snapshotPending) return;
+    snapshotPending = false;
+
+    Gpu3DSnapshot s;
+    melonDS::NDS* nds = instance->getNDS();
+    if (nds)
+    {
+        melonDS::GPU3D& g = nds->GPU.GPU3D;
+        s.valid = true;
+        s.geometryEnabled = g.GeometryEnabled;
+        s.renderingEnabled = g.RenderingEnabled;
+        s.frame = nds->NumFrames;
+        s.dispCnt = g.DispCnt;
+        s.gxStat = g.GXStat;
+        s.fifoCmd = g.CmdFIFO.Level();
+        s.fifoPipe = g.CmdPIPE.Level();
+        s.fifoStall = g.CmdStallQueue.Level();
+        s.matrixMode = g.MatrixMode;
+        for (int i = 0; i < 6; i++) s.viewport[i] = g.Viewport[i];
+        for (int i = 0; i < 16; i++)
+        {
+            s.proj[i] = g.ProjMatrix[i];
+            s.pos[i] = g.PosMatrix[i];
+            s.vec[i] = g.VecMatrix[i];
+            s.tex[i] = g.TexMatrix[i];
+        }
+        s.fogColor = g.FogColor;
+        s.fogOffset = g.FogOffset;
+        s.numVertices = g.NumVertices;
+        s.numPolygons = g.NumPolygons;
+
+        uint32_t count = g.RenderNumPolygons;
+        const uint32_t maxPolys = (uint32_t)g.RenderPolygonRAM.size();
+        if (count > maxPolys) count = maxPolys;
+        s.renderPolygons = count;
+        s.polys.reserve(count);
+
+        for (uint32_t i = 0; i < count; i++)
+        {
+            const melonDS::Polygon* p = g.RenderPolygonRAM[i];
+            if (!p) continue;
+
+            Gpu3DPoly pv {};
+            pv.attr = p->Attr;
+            pv.texParam = p->TexParam;
+            pv.texPalette = p->TexPalette;
+            pv.type = p->Type;
+            pv.numVertices = p->NumVertices < 10 ? p->NumVertices : 10;
+            pv.translucent = p->Translucent;
+            for (uint32_t v = 0; v < pv.numVertices; v++)
+            {
+                const melonDS::Vertex* vv = p->Vertices[v];
+                if (!vv) continue;
+                Gpu3DVertex& out = pv.verts[v];
+                out.x = vv->FinalPosition[0];
+                out.y = vv->FinalPosition[1];
+                out.z = p->FinalZ[v];
+                out.w = p->FinalW[v];
+                out.r = (uint8_t)(vv->FinalColor[0] >> 12);
+                out.g = (uint8_t)(vv->FinalColor[1] >> 12);
+                out.b = (uint8_t)(vv->FinalColor[2] >> 12);
+                out.u = vv->TexCoords[0];
+                out.v = vv->TexCoords[1];
+            }
+            s.polys.push_back(pv);
+
+            if (((pv.texParam >> 26) & 0x7) != 0)
+            {
+                const uint64_t key = ((uint64_t)pv.texParam << 32) | pv.texPalette;
+                bool found = false;
+                for (uint64_t k : s.textures) { if (k == key) { found = true; break; } }
+                if (!found) s.textures.push_back(key);
+            }
+        }
+    }
+
+    snapshotData = std::move(s);
+    snapshotReady = true;
+    lk.unlock();
+    snapshotCv.notify_all();
+}
+
+bool ControlServer::requestSnapshot(Gpu3DSnapshot& out, int timeoutMs)
+{
+    melonDS::NDS* nds = instance->getNDS();
+    if (!nds) return false;
+
+    {
+        std::lock_guard<std::mutex> lk(snapshotMutex);
+        snapshotPending = true;
+        snapshotReady = false;
+        snapshotData = Gpu3DSnapshot{};
+    }
+
+    nds->OnVBlank = [this] { onVBlank(); };
+
+    std::unique_lock<std::mutex> lk(snapshotMutex);
+    if (!snapshotCv.wait_for(lk, std::chrono::milliseconds(timeoutMs),
+                             [&] { return snapshotReady; }))
+    {
+        snapshotPending = false;
+        return false;
+    }
+
+    out = snapshotData;
+    return out.valid;
+}
+
+// Runs on the emu thread. Appends one GXFIFO entry (O(1)); the ring drops the
+// oldest entries on overflow.
+void ControlServer::onGXCommand(uint32_t cmd, uint32_t param, uint32_t pc,
+                                uint32_t frame, uint32_t fifo)
+{
+    std::lock_guard<std::mutex> lk(gxMutex);
+    if (!gxActive) return;
+    gxRing.push({cmd, param, pc, frame, fifo});
+}
+
+// Disables the trace but leaves the collected entries readable via 3d.gxfifo.read.
+void ControlServer::stopGXTrace()
+{
+    melonDS::NDS* nds = instance->getNDS();
+    if (nds) nds->OnGXCommand = nullptr;
+
+    std::lock_guard<std::mutex> lk(gxMutex);
+    gxActive = false;
 }
 
 void ControlServer::sendMessage(Client* client, const std::string& body)
@@ -1059,6 +1252,205 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
         return ok({{"ok", true}});
     }
 
+    if (method == "3d.state")
+    {
+        Gpu3DSnapshot s;
+        if (!requestSnapshot(s, 2000))
+            return fail(-32000, "3D snapshot timeout (emulator paused?)");
+
+        auto matrix = [](const int32_t* m) {
+            json a = json::array();
+            for (int i = 0; i < 16; i++) a.push_back(m[i]);
+            return a;
+        };
+        json viewport = json::array();
+        for (int i = 0; i < 6; i++) viewport.push_back(s.viewport[i]);
+
+        return ok({
+            {"frame", s.frame},
+            {"enabled", {{"geometry", s.geometryEnabled}, {"rendering", s.renderingEnabled}}},
+            {"disp3dcnt", s.dispCnt},
+            {"gxstat", s.gxStat},
+            {"fifo", {{"cmd", s.fifoCmd}, {"pipe", s.fifoPipe}, {"stall", s.fifoStall}}},
+            {"matrix_mode", s.matrixMode},
+            {"matrices", {{"projection", matrix(s.proj)}, {"position", matrix(s.pos)},
+                          {"vector", matrix(s.vec)}, {"texture", matrix(s.tex)}}},
+            {"viewport", viewport},
+            {"fog", {{"color", s.fogColor}, {"offset", s.fogOffset}}},
+            {"counts", {{"vertices", s.numVertices}, {"polygons", s.numPolygons},
+                        {"render_polygons", s.renderPolygons}}},
+        });
+    }
+
+    if (method == "3d.polygons")
+    {
+        Gpu3DSnapshot s;
+        if (!requestSnapshot(s, 2000))
+            return fail(-32000, "3D snapshot timeout (emulator paused?)");
+
+        uint32_t maxItems = params.value("max_items", 512);
+        if (maxItems < 1) maxItems = 1;
+        if (maxItems > 8192) maxItems = 8192;
+        bool withVerts = params.value("vertices", true);
+
+        const uint32_t n = std::min<uint32_t>((uint32_t)s.polys.size(), maxItems);
+        json polys = json::array();
+        for (uint32_t i = 0; i < n; i++)
+        {
+            const Gpu3DPoly& p = s.polys[i];
+            json pj = {
+                {"attr", p.attr}, {"tex_param", p.texParam}, {"tex_palette", p.texPalette},
+                {"type", p.type}, {"num_vertices", p.numVertices},
+                {"translucent", p.translucent},
+            };
+            if (withVerts)
+            {
+                json verts = json::array();
+                for (uint32_t v = 0; v < p.numVertices; v++)
+                {
+                    const Gpu3DVertex& vv = p.verts[v];
+                    verts.push_back({
+                        {"x", vv.x}, {"y", vv.y}, {"z", vv.z}, {"w", vv.w},
+                        {"color", {vv.r, vv.g, vv.b}},
+                        {"texcoord", {vv.u, vv.v}},
+                    });
+                }
+                pj["vertices"] = verts;
+            }
+            polys.push_back(pj);
+        }
+
+        return ok({{"frame", s.frame}, {"count", polys.size()},
+                   {"total", (int)s.polys.size()}, {"polygons", polys}});
+    }
+
+    if (method == "3d.textures")
+    {
+        Gpu3DSnapshot s;
+        if (!requestSnapshot(s, 2000))
+            return fail(-32000, "3D snapshot timeout (emulator paused?)");
+
+        json list = json::array();
+        for (size_t i = 0; i < s.textures.size(); i++)
+        {
+            const uint64_t key = s.textures[i];
+            const uint32_t texParam = (uint32_t)(key >> 32);
+            const uint32_t texPalette = (uint32_t)key;
+            const uint32_t fmt = (texParam >> 26) & 0x7;
+            const uint32_t w = 8u << ((texParam >> 20) & 0x7);
+            const uint32_t h = 8u << ((texParam >> 23) & 0x7);
+            list.push_back({
+                {"index", (int)i}, {"tex_param", texParam}, {"tex_palette", texPalette},
+                {"format", fmt}, {"width", w}, {"height", h},
+                {"vram_addr", (texParam & 0xFFFF) * 8},
+            });
+        }
+        return ok({{"frame", s.frame}, {"count", list.size()}, {"textures", list}});
+    }
+
+    if (method == "3d.texture")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+
+        uint32_t texParam = params.value("tex_param", 0u);
+        uint32_t texPalette = params.value("tex_palette", 0u);
+        if (params.contains("index"))
+        {
+            int index = params.value("index", 0);
+            Gpu3DSnapshot s;
+            if (!requestSnapshot(s, 2000))
+                return fail(-32000, "3D snapshot timeout (emulator paused?)");
+            if (index < 0 || index >= (int)s.textures.size())
+                return fail(-32602, "texture index out of range");
+            const uint64_t key = s.textures[index];
+            texParam = (uint32_t)(key >> 32);
+            texPalette = (uint32_t)key;
+        }
+
+        std::vector<uint8_t> rgba;
+        int w = 0, h = 0;
+        instance->getEmuThread()->emuPause(false);
+        const bool decoded = melonDS::Decode3DTexture(*nds, texParam, texPalette, rgba, w, h);
+        instance->getEmuThread()->emuUnpause(false);
+
+        if (!decoded)
+            return fail(-32000, "texture decode failed (no texture/unsupported format)");
+
+        if (!isNotification)
+        {
+            json result = {
+                {"binary", {{"bytes", rgba.size()}, {"width", w}, {"height", h},
+                            {"format", "rgba8"}}},
+                {"tex_param", texParam}, {"tex_palette", texPalette},
+            };
+            json resp = {{"jsonrpc", "2.0"}, {"id", id}, {"result", result}};
+            sendMessage(client, resp.dump());
+            sendBinary(client, rgba);
+        }
+        return true;
+    }
+
+    if (method == "3d.gxfifo.start")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+        uint32_t maxItems = params.value("max_items", 65536);
+        if (maxItems < 1) maxItems = 1;
+        if (maxItems > (1u << 22)) maxItems = 1u << 22;
+
+        {
+            std::lock_guard<std::mutex> lk(gxMutex);
+            gxActive = true;
+            gxRing.reset(maxItems);
+        }
+        nds->OnGXCommand = [this](uint32_t cmd, uint32_t param, uint32_t pc,
+                                  uint32_t frame, uint32_t fifo) {
+            onGXCommand(cmd, param, pc, frame, fifo);
+        };
+        return ok({{"ok", true}, {"max_items", maxItems}});
+    }
+    if (method == "3d.gxfifo.read")
+    {
+        std::vector<GXEvent> batch;
+        uint64_t dropped;
+        {
+            std::lock_guard<std::mutex> lk(gxMutex);
+            gxRing.drain(batch);
+            dropped = gxRing.dropped;
+            gxRing.dropped = 0;
+        }
+        json cmds = json::array();
+        for (size_t i = 0; i < batch.size(); )
+        {
+            const GXEvent& first = batch[i];
+            const uint32_t cmd = first.cmd & 0xFF;
+            const uint32_t total = melonDS::CmdNumParams[cmd];
+            json params = json::array();
+            size_t j = i;
+            uint32_t consumed = 0;
+
+            while (j < batch.size() && (batch[j].cmd & 0xFF) == cmd && consumed < total)
+            {
+                params.push_back(batch[j].param);
+                consumed++;
+                j++;
+            }
+            if (total == 0 || j == i)
+                j = i + 1;
+
+            cmds.push_back({{"cmd", cmd}, {"name", GXCommandName(cmd)},
+                            {"pc", first.pc}, {"frame", first.frame},
+                            {"fifo", first.fifo}, {"params", params}});
+            i = j;
+        }
+        return ok({{"count", cmds.size()}, {"entries", batch.size()},
+                   {"dropped", dropped}, {"commands", cmds}});
+    }
+    if (method == "3d.gxfifo.stop")
+    {
+        stopGXTrace();
+        return ok({{"ok", true}});
+    }
+
     return fail(-32601, "method not found");
 }
 
@@ -1080,5 +1472,9 @@ void ControlServer::stopCartTrace(Client*) {}
 void ControlServer::onDmaTransfer(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
 void ControlServer::flushDma(Client*) {}
 void ControlServer::stopDmaTrace(Client*) {}
+void ControlServer::onVBlank() {}
+bool ControlServer::requestSnapshot(Gpu3DSnapshot&, int) { return false; }
+void ControlServer::onGXCommand(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
+void ControlServer::stopGXTrace() {}
 
 #endif // _WIN32
