@@ -190,6 +190,9 @@ public:
 
 	int RespStr(const char* str);
 	inline bool IsConnected() { return ConnFd > 0; }
+	// True while the stub is holding the CPU halted (waiting for gdb), i.e. the
+	// emulation is not advancing. Safe to read from other threads.
+	inline bool IsHalted() const { return Halted.load(std::memory_order_relaxed); }
 
 private:
 	void Disconnect();
@@ -221,6 +224,7 @@ private:
 	u32 CurBkpt, CurWatchpt;
 	bool StatFlag;
 	bool NoAck;
+	std::atomic<bool> Halted {false};
 
 	std::array<u8, GDBPROTO_BUFFER_CAPACITY> RecvBuffer;
 	u32 RecvBufferFilled = 0;

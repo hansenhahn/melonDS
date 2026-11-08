@@ -223,6 +223,14 @@ private:
     // 3D snapshot: captured at the next VBlank (one-shot, on demand).
     void onVBlank();
     bool requestSnapshot(Gpu3DSnapshot& out, int timeoutMs = 2000);
+    // Serves a 3D snapshot according to `source` ("auto" default, "last",
+    // "fresh"), using the cached completed frame when possible so the read works
+    // even with the CPU halted.
+    bool snapshotForRequest(const std::string& source, Gpu3DSnapshot& out,
+                            std::string& err);
+    // Arms a snapshot for the last frame of an in-progress emu.step_frame(n).
+    void armStepSnapshot();
+    bool isHalted();
 
     // GXFIFO command trace: called on the emu thread for every enqueued entry.
     void onGXCommand(uint32_t cmd, uint32_t param, uint32_t pc, uint32_t frame, uint32_t fifo);
@@ -275,7 +283,10 @@ private:
     std::condition_variable snapshotCv;
     bool snapshotPending = false;
     bool snapshotReady = false;
-    Gpu3DSnapshot snapshotData;
+    bool snapshotStepTarget = false;
+    // last completed snapshot, served by source=last/auto with the CPU halted
+    bool hasCachedSnapshot = false;
+    Gpu3DSnapshot cachedSnapshot;
 
     // GXFIFO command trace
     std::mutex gxMutex;
@@ -296,6 +307,10 @@ private:
 
     // opt-in traffic logging (MELONDS_CONTROL_LOG); off by default
     bool logTraffic;
+
+    // frame at which the last emu.step_frame stopped (0 = none yet); used to
+    // tell a frame-boundary halt from a mid-frame breakpoint halt.
+    uint32_t lastStepFrame = 0;
 };
 
 #endif

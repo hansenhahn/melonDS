@@ -523,7 +523,9 @@ StubState GdbStub::Enter(bool stay, TgtStatus stat, u32 arg, bool wait_for_conn)
 		if (stay && Gdb::HaltService) Gdb::HaltService();
 		// a frame-step is in progress: release the CPU so the frontend can run the N
 		// frames (it breaks back into the stub when the step completes)
-		if (stay && Gdb::FrameStepRun && Gdb::FrameStepRun()) do_next = false;
+		bool stepRunning = stay && Gdb::FrameStepRun && Gdb::FrameStepRun();
+		if (stepRunning) do_next = false;
+		Halted.store(stay && has_conn && !stepRunning, std::memory_order_relaxed);
 		if (st == StubState::None) Platform::Sleep(1000);
 
 		switch (st)
@@ -549,6 +551,7 @@ StubState GdbStub::Enter(bool stay, TgtStatus stat, u32 arg, bool wait_for_conn)
 		}
 	}
 	while (do_next && stay);
+	Halted.store(false, std::memory_order_relaxed);
 
 	if (st != StubState::None && st != StubState::NoConn)
 	{
