@@ -33,6 +33,7 @@ set(SOURCES_QT_SDL
     ROMInfoDialog.cpp
     RAMInfoDialog.cpp
     OAMViewerDialog.cpp
+    GPU3DTextureExport.cpp
     ThreeDViewerPage.cpp
     ViewerTabsDialog.cpp
     TitleManagerDialog.cpp

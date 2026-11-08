@@ -30,11 +30,12 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cstring>
 
 #include "EmuInstance.h"
 #include "EmuThread.h"
 #include "GPU.h"
-#include "GPU3D_Texcache.h"
+#include "GPU3DTextureExport.h"
 #include "NDS.h"
 #include "main.h"
 
@@ -52,63 +53,17 @@ QString hexv(u32 v, int digits)
 
 QImage DecodeTexture(NDS* nds, u32 texParam, u32 texPalette)
 {
-    const u32 fmt = (texParam >> 26) & 0x7;
-    if (!nds || fmt == 0) return QImage();
+    if (!nds) return QImage();
 
-    GPU& gpu = nds->GPU;
-    auto texDirty = gpu.VRAMDirty_Texture.DeriveState(gpu.VRAMMap_Texture, gpu);
-    auto palDirty = gpu.VRAMDirty_TexPal.DeriveState(gpu.VRAMMap_TexPal, gpu);
-    gpu.MakeVRAMFlat_TextureCoherent(texDirty);
-    gpu.MakeVRAMFlat_TexPalCoherent(palDirty);
+    std::vector<u8> rgba;
+    int w = 0, h = 0;
+    if (!Decode3DTexture(*nds, texParam, texPalette, rgba, w, h))
+        return QImage();
 
-    const u32 w = TextureWidth(texParam);
-    const u32 h = TextureHeight(texParam);
-    const u32 addr = (texParam & 0xFFFF) * 8;
-    std::vector<u32> buf((size_t)w * h, 0);
-
-    if (fmt == 7)
-    {
-        ConvertBitmapTexture<outputFmt_RGB6A5>(w, h, buf.data(), addr, gpu);
-    }
-    else if (fmt == 5)
-    {
-        u32 slot1 = 0x20000 + ((addr & 0x1FFFC) >> 1);
-        if (addr >= 0x40000) slot1 += 0x10000;
-        ConvertCompressedTexture<outputFmt_RGB6A5>(w, h, buf.data(), addr, slot1,
-                                                   texPalette * 16, gpu);
-    }
-    else
-    {
-        u32 palAddr = texPalette * 16;
-        if (fmt == 2) palAddr >>= 1;
-        palAddr &= 0x1FFFF;
-        const bool color0Transparent = (texParam & (1u << 29)) != 0;
-
-        switch (fmt)
-        {
-        case 1: ConvertAXIYTexture<outputFmt_RGB6A5, 3, 5>(w, h, buf.data(), addr, palAddr, gpu); break;
-        case 6: ConvertAXIYTexture<outputFmt_RGB6A5, 5, 3>(w, h, buf.data(), addr, palAddr, gpu); break;
-        case 2: ConvertNColorsTexture<outputFmt_RGB6A5, 2>(w, h, buf.data(), addr, palAddr, color0Transparent, gpu); break;
-        case 3: ConvertNColorsTexture<outputFmt_RGB6A5, 4>(w, h, buf.data(), addr, palAddr, color0Transparent, gpu); break;
-        case 4: ConvertNColorsTexture<outputFmt_RGB6A5, 8>(w, h, buf.data(), addr, palAddr, color0Transparent, gpu); break;
-        default: return QImage();
-        }
-    }
-
-    QImage img((int)w, (int)h, QImage::Format_ARGB32);
-    for (u32 y = 0; y < h; y++)
-    {
-        for (u32 x = 0; x < w; x++)
-        {
-            const u32 px = buf[(size_t)y * w + x];
-            const int r = (int)(px & 0xFF) * 255 / 63;
-            const int g = (int)((px >> 8) & 0xFF) * 255 / 63;
-            const int b = (int)((px >> 16) & 0xFF) * 255 / 63;
-            const int a = (int)((px >> 24) & 0x1F) * 255 / 31;
-            img.setPixel((int)x, (int)y, qRgba(r, g, b, a));
-        }
-    }
-    return img;
+    QImage img(w, h, QImage::Format_RGBA8888);
+    for (int y = 0; y < h; y++)
+        memcpy(img.scanLine(y), rgba.data() + (size_t)y * w * 4, (size_t)w * 4);
+    return img.copy();
 }
 
 }

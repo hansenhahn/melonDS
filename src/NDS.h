@@ -462,6 +462,14 @@ public: // TODO: Encapsulate the rest of these members
     // Optional hook for the DMA transfer trace. Called on the emulation thread at the
     // start of each DMA transfer with (cpu, channel, src, dst, cnt, programmer pc).
     std::function<void(u32 cpu, u32 num, u32 src, u32 dst, u32 cnt, u32 pc)> OnDmaTransfer;
+
+    // Called at the end of GPU3D::VBlank, after RenderPolygonRAM is finalized.
+    // Used for a one-shot 3D snapshot (no cost when unset).
+    std::function<void()> OnVBlank;
+
+    // Called on the emu thread for every GXFIFO entry enqueued from the writer
+    // path (CPU or DMA). Used by the control-channel GXFIFO trace.
+    std::function<void(u32 cmd, u32 param, u32 pc, u32 frame, u32 fifo_level)> OnGXCommand;
     void NocashPrint(u32 cpu, u32 addr, bool appendNewline = true);
 
     void MonitorARM9Jump(u32 addr);

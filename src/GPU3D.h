@@ -27,6 +27,8 @@
 
 namespace melonDS
 {
+// Number of parameters for each GXFIFO command (0x00..0xFF).
+extern const u8 CmdNumParams[256];
 class GPU;
 
 struct Vertex
