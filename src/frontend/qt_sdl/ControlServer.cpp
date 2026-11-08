@@ -60,7 +60,8 @@ static Gdb::GdbStub* GetHitStub(melonDS::NDS* nds, const std::string& core)
 ControlServer::ControlServer(EmuInstance* inst) : instance(inst), listenFd(-1), running(false),
     captureRequested(false), captureDone(false), captureValid(false), captureScreens(2),
     cartActive(false), cartBatchN(256), cartEventFd(-1),
-    dmaActive(false), dmaBatchN(256), dmaEventFd(-1), gxActive(false), logTraffic(false)
+    dmaActive(false), dmaBatchN(256), dmaEventFd(-1), gxActive(false),
+    originActive(false), logTraffic(false)
 {
 }
 
@@ -215,10 +216,15 @@ void ControlServer::stop()
     {
         nds->OnVBlank = nullptr;
         nds->OnGXCommand = nullptr;
+        nds->OnDmaTransfer = nullptr;
     }
     {
         std::lock_guard<std::mutex> lk(snapshotMutex);
         snapshotPending = false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(originMutex);
+        originActive = false;
     }
 
     if (!socketPath.empty()) unlink(socketPath.c_str());
@@ -464,16 +470,39 @@ void ControlServer::stopCartTrace(Client* client)
 void ControlServer::onDmaTransfer(uint32_t cpu, uint32_t ch, uint32_t src, uint32_t dst,
                                   uint32_t cnt, uint32_t pc)
 {
-    std::lock_guard<std::mutex> lk(dmaMutex);
-    if (!dmaActive) return;
-
-    dmaRing.push({cpu, ch, src, dst, cnt, pc});
-    if ((int)dmaRing.size() >= dmaBatchN && dmaEventFd >= 0)
     {
-        uint64_t one = 1;
-        ssize_t r = write(dmaEventFd, &one, sizeof(one));
-        (void)r;
+        std::lock_guard<std::mutex> lk(dmaMutex);
+        if (dmaActive)
+        {
+            dmaRing.push({cpu, ch, src, dst, cnt, pc});
+            if ((int)dmaRing.size() >= dmaBatchN && dmaEventFd >= 0)
+            {
+                uint64_t one = 1;
+                ssize_t r = write(dmaEventFd, &one, sizeof(one));
+                (void)r;
+            }
+        }
     }
+
+    std::lock_guard<std::mutex> lk(originMutex);
+    if (!originActive) return;
+
+    const uint32_t cntmask = (cpu == 0) ? 0x001FFFFF : ((ch == 3) ? 0x0000FFFF : 0x00003FFF);
+    uint32_t count = cnt & cntmask;
+    if (!count) count = cntmask + 1;
+    const uint32_t unit = (cnt & (1u << 26)) ? 4 : 2;
+    const uint32_t bytes = count * unit;
+
+    uint32_t lo = dst, hi = dst + bytes;
+    switch ((cnt >> 21) & 0x3)
+    {
+    case 1: lo = dst - bytes; hi = dst; break;      // decrement
+    case 2: hi = dst + unit; break;                 // fixed
+    default: break;                                 // increment
+    }
+
+    melonDS::NDS* nds = instance->getNDS();
+    originRing.push({lo, hi, src, bytes, pc, nds ? nds->NumFrames : 0, 0});
 }
 
 // Runs on the subscriber's client thread. Drains the buffer and sends a batch.
@@ -505,7 +534,15 @@ void ControlServer::stopDmaTrace(Client* client)
     if (!client->dmaTrace) return;
 
     melonDS::NDS* nds = instance->getNDS();
-    if (nds) nds->OnDmaTransfer = nullptr;
+    if (nds)
+    {
+        bool keepOrigin;
+        {
+            std::lock_guard<std::mutex> lk(originMutex);
+            keepOrigin = originActive;
+        }
+        if (!keepOrigin) nds->OnDmaTransfer = nullptr;
+    }
 
     {
         std::lock_guard<std::mutex> lk(dmaMutex);
@@ -1390,6 +1427,68 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
         return true;
     }
 
+    if (method == "3d.texture_raw")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+
+        uint32_t texParam = params.value("tex_param", 0u);
+        uint32_t texPalette = params.value("tex_palette", 0u);
+        if (params.contains("index"))
+        {
+            int index = params.value("index", 0);
+            Gpu3DSnapshot s;
+            if (!requestSnapshot(s, 2000))
+                return fail(-32000, "3D snapshot timeout (emulator paused?)");
+            if (index < 0 || index >= (int)s.textures.size())
+                return fail(-32602, "texture index out of range");
+            const uint64_t key = s.textures[index];
+            texParam = (uint32_t)(key >> 32);
+            texPalette = (uint32_t)key;
+        }
+
+        const uint32_t fmt = (texParam >> 26) & 0x7;
+        const uint32_t w = 8u << ((texParam >> 20) & 0x7);
+        const uint32_t h = 8u << ((texParam >> 23) & 0x7);
+        uint32_t size = 0;
+        switch (fmt)
+        {
+        case 7: size = w * h * 2; break;
+        case 1: case 6: size = w * h; break;
+        case 2: size = w * h / 4; break;
+        case 3: size = w * h / 2; break;
+        case 4: size = w * h; break;
+        default: return fail(-32000, "raw texture unsupported for this format");
+        }
+
+        const uint32_t addr = (texParam & 0xFFFF) * 8;
+        if (addr + size > sizeof(nds->GPU.VRAMFlat_Texture))
+            return fail(-32000, "texture range outside VRAM");
+
+        std::vector<uint8_t> raw;
+        instance->getEmuThread()->emuPause(false);
+        {
+            auto dirty = nds->GPU.VRAMDirty_Texture.DeriveState(nds->GPU.VRAMMap_Texture, nds->GPU);
+            nds->GPU.MakeVRAMFlat_TextureCoherent(dirty);
+            raw.assign(nds->GPU.VRAMFlat_Texture + addr,
+                       nds->GPU.VRAMFlat_Texture + addr + size);
+        }
+        instance->getEmuThread()->emuUnpause(false);
+
+        if (!isNotification)
+        {
+            json result = {
+                {"binary", {{"bytes", raw.size()}, {"width", w}, {"height", h},
+                            {"format", "raw"}}},
+                {"tex_param", texParam}, {"tex_palette", texPalette},
+                {"format_id", fmt}, {"size", size},
+            };
+            json resp = {{"jsonrpc", "2.0"}, {"id", id}, {"result", result}};
+            sendMessage(client, resp.dump());
+            sendBinary(client, raw);
+        }
+        return true;
+    }
+
     if (method == "3d.gxfifo.start")
     {
         if (!nds) return fail(-32000, "emulator not running");
@@ -1449,6 +1548,75 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
     {
         stopGXTrace();
         return ok({{"ok", true}});
+    }
+
+    if (method == "origin.start")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+        uint32_t maxItems = params.value("max_items", 65536);
+        if (maxItems < 1) maxItems = 1;
+        if (maxItems > (1u << 22)) maxItems = 1u << 22;
+
+        {
+            std::lock_guard<std::mutex> lk(originMutex);
+            originActive = true;
+            originRing.reset(maxItems);
+        }
+        nds->OnDmaTransfer = [this](uint32_t cpu, uint32_t ch, uint32_t src, uint32_t dst,
+                                    uint32_t cnt, uint32_t pc) {
+            onDmaTransfer(cpu, ch, src, dst, cnt, pc);
+        };
+        return ok({{"ok", true}, {"max_items", maxItems}});
+    }
+    if (method == "origin.stop")
+    {
+        {
+            std::lock_guard<std::mutex> lk(originMutex);
+            originActive = false;
+        }
+        bool dmaOn;
+        {
+            std::lock_guard<std::mutex> lk(dmaMutex);
+            dmaOn = dmaActive;
+        }
+        if (nds && !dmaOn) nds->OnDmaTransfer = nullptr;
+        return ok({{"ok", true}});
+    }
+    if (method == "origin.query" || method == "gxfifo.origin")
+    {
+        const bool gx = method == "gxfifo.origin";
+        uint32_t addr = gx ? 0x04000400 : params.value("addr", 0u);
+        uint32_t len = gx ? 4 : params.value("len", 1u);
+        if (!len) len = 1;
+        int maxAge = params.value("max_age_frames", 0);
+        int maxHits = params.value("max_hits", 16);
+        if (maxHits < 1) maxHits = 1;
+        if (maxHits > 256) maxHits = 256;
+
+        const uint32_t currentFrame = nds ? nds->NumFrames : 0;
+        json hits = json::array();
+        uint64_t dropped = 0;
+        {
+            std::lock_guard<std::mutex> lk(originMutex);
+            dropped = originRing.dropped;
+            const size_t cap = originRing.buf.size();
+            const uint32_t endAddr = addr + len;
+            if (cap > 0)
+            {
+                for (size_t i = 0; i < originRing.count && (int)hits.size() < maxHits; i++)
+                {
+                    const size_t idx = (originRing.head + cap - 1 - i) % cap;
+                    const OriginEvent& e = originRing.buf[idx];
+                    if (e.dstLo >= endAddr || e.dstHi <= addr) continue;
+                    if (maxAge > 0 && e.frame + (uint32_t)maxAge < currentFrame) continue;
+                    hits.push_back({{"src", e.src}, {"dst_lo", e.dstLo}, {"dst_hi", e.dstHi},
+                                    {"len", e.len}, {"pc", e.pc}, {"frame", e.frame},
+                                    {"kind", e.kind}});
+                }
+            }
+        }
+        return ok({{"count", hits.size()}, {"unknown", hits.empty()},
+                   {"hits", hits}, {"dropped", dropped}});
     }
 
     return fail(-32601, "method not found");
