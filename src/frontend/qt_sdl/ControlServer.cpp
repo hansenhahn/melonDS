@@ -1607,6 +1607,84 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
         return true;
     }
 
+    if (method.rfind("cart.override.", 0) == 0)
+    {
+        melonDS::NDSCart::CartCommon* cart = nds ? nds->GetNDSCart() : nullptr;
+        if (!cart) return fail(-32000, "no ROM loaded");
+
+        if (method == "cart.override.list")
+        {
+            json arr = json::array();
+            for (const auto& ov : cart->GetROMOverrides())
+            {
+                arr.push_back({{"start", ov.Start}, {"end", ov.End},
+                               {"host_path", ov.HostPath}, {"host_size", ov.HostSize},
+                               {"hits", ov.Hits}, {"bytes", ov.Bytes}, {"loaded", true}});
+            }
+            return ok({{"overrides", arr}});
+        }
+
+        const int64_t start = params.value("start", (int64_t)-1);
+        const int64_t end = params.value("end", (int64_t)-1);
+        if (start < 0 || end <= start || (uint64_t)end > (uint64_t)cart->GetROMLength())
+            return fail(-32602, "invalid override range");
+
+        if (method == "cart.override.set")
+        {
+            const std::string hostPath = params.value("host_path", std::string());
+            if (hostPath.empty()) return fail(-32602, "host_path is required");
+
+            std::vector<uint8_t> data;
+            if (!ReadFileBytes(hostPath, data)) return fail(-32000, "host file missing");
+            const size_t hostSize = data.size();
+
+            if (!cart->SetROMOverride((uint32_t)start, (uint32_t)end, hostPath, std::move(data)))
+                return fail(-32000, "overlapping override");
+            return ok({{"ok", true}, {"start", start}, {"end", end}, {"host_size", hostSize}});
+        }
+
+        if (method == "cart.override.reload")
+        {
+            std::string hostPath;
+            bool found = false;
+            for (const auto& ov : cart->GetROMOverrides())
+            {
+                if (ov.Start == (uint32_t)start && ov.End == (uint32_t)end)
+                {
+                    hostPath = ov.HostPath;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return fail(-32000, "override not found");
+
+            std::vector<uint8_t> data;
+            if (!ReadFileBytes(hostPath, data)) return fail(-32000, "host file missing");
+            const size_t hostSize = data.size();
+
+            if (!cart->ReloadROMOverride((uint32_t)start, (uint32_t)end, std::move(data)))
+                return fail(-32000, "override not found");
+            return ok({{"ok", true}, {"host_size", hostSize}});
+        }
+
+        if (method == "cart.override.clear")
+        {
+            if (!cart->ClearROMOverride((uint32_t)start, (uint32_t)end))
+                return fail(-32000, "override not found");
+            return ok({{"ok", true}});
+        }
+
+        if (method == "cart.override.stats")
+        {
+            uint64_t hits = 0, bytes = 0;
+            if (!cart->GetROMOverrideStats((uint32_t)start, (uint32_t)end, hits, bytes))
+                return fail(-32000, "override not found");
+            return ok({{"hits", hits}, {"bytes", bytes}, {"loaded", true}});
+        }
+
+        return fail(-32601, "unknown cart.override method");
+    }
+
     if (method == "cart.trace.start")
     {
         if (!nds) return fail(-32000, "emulator not running");
