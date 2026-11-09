@@ -19,7 +19,11 @@
 #ifndef NDSCART_CARTCOMMON_H
 #define NDSCART_CARTCOMMON_H
 
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include "../types.h"
 #include "../Savestate.h"
@@ -45,6 +49,17 @@ enum CartType
 };
 
 class NDSCartSlot;
+
+/// Metadata of a runtime content override (no payload) for the control channel.
+struct ROMOverrideInfo
+{
+    u32 Start = 0;
+    u32 End = 0;
+    std::string HostPath;
+    u64 HostSize = 0;
+    u64 Hits = 0;
+    u64 Bytes = 0;
+};
 
 // CartCommon -- base code shared by all cart types
 class CartCommon
@@ -93,8 +108,19 @@ public:
     [[nodiscard]] u32 GetROMAddr() const { return ROMAddr; }
     [[nodiscard]] bool IsROMReadCommand() const;
 
+    // Runtime content overrides. Managed by the control server (socket thread);
+    // read by ROMRead32 on the emulation thread. Overrides are per-cart and are
+    // not serialized in savestates.
+    bool SetROMOverride(u32 start, u32 end, std::string hostPath, std::vector<u8>&& data);
+    bool ReloadROMOverride(u32 start, u32 end, std::vector<u8>&& data);
+    bool ClearROMOverride(u32 start, u32 end);
+    [[nodiscard]] std::vector<ROMOverrideInfo> GetROMOverrides() const;
+    bool GetROMOverrideStats(u32 start, u32 end, u64& hits, u64& bytes) const;
+
 protected:
     u32 ROMRead32();
+
+    u32 ROMRead32Override(u32 addrhi, u32 addrlo);
 
     void* UserData;
 
@@ -124,6 +150,21 @@ protected:
     NDSHeader Header {};
     ROMListEntry ROMParams {};
     const melonDS::NDSCart::CartType CartType = Default;
+
+private:
+    struct ROMOverride
+    {
+        u32 Start;
+        u32 End;
+        std::string HostPath;
+        std::vector<u8> Data;
+        u64 Hits;
+        u64 Bytes;
+    };
+
+    mutable std::mutex OverrideMutex;
+    std::vector<ROMOverride> Overrides;
+    std::atomic<bool> OverrideActive {false};
 };
 
 }

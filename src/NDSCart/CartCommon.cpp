@@ -127,7 +127,12 @@ u32 CartCommon::ROMRead32()
     u32 addrlo = ROMAddr & 0xFFF;
     u32 ret;
 
-    if (addrlo & 0x3)
+    if (OverrideActive.load(std::memory_order_acquire))
+    {
+        ret = ROMRead32Override(addrhi, addrlo);
+        addrlo = (addrlo + 4) & 0xFFF;
+    }
+    else if (addrlo & 0x3)
     {
         ret = ROM[addrhi | addrlo];
         addrlo = (addrlo + 1) & 0xFFF;
@@ -147,6 +152,108 @@ u32 CartCommon::ROMRead32()
     ROMAddr = addrhi | addrlo;
     return ret;
 }
+
+u32 CartCommon::ROMRead32Override(u32 addrhi, u32 addrlo)
+{
+    u32 ret = 0;
+
+    std::lock_guard<std::mutex> lk(OverrideMutex);
+    for (u32 i = 0; i < 4; i++)
+    {
+        const u32 addr = addrhi | ((addrlo + i) & 0xFFF);
+        u32 value = 0;
+        bool served = false;
+        for (auto& ov : Overrides)
+        {
+            if (addr < ov.Start || addr >= ov.End)
+                continue;
+
+            const u32 off = addr - ov.Start;
+            value = (off < ov.Data.size()) ? ov.Data[off] : 0;
+            if (i == 0)
+                ov.Hits++;
+            ov.Bytes++;
+            served = true;
+            break;
+        }
+        if (!served)
+            value = ROM[addr];
+        ret |= value << (i * 8);
+    }
+    return ret;
+}
+
+bool CartCommon::SetROMOverride(u32 start, u32 end, std::string hostPath, std::vector<u8>&& data)
+{
+    if (start >= end || end > ROMLength)
+        return false;
+
+    std::lock_guard<std::mutex> lk(OverrideMutex);
+    for (const auto& ov : Overrides)
+    {
+        if (start < ov.End && ov.Start < end)
+            return false;
+    }
+
+    Overrides.push_back({start, end, std::move(hostPath), std::move(data), 0, 0});
+    OverrideActive.store(true, std::memory_order_release);
+    return true;
+}
+
+bool CartCommon::ReloadROMOverride(u32 start, u32 end, std::vector<u8>&& data)
+{
+    std::lock_guard<std::mutex> lk(OverrideMutex);
+    for (auto& ov : Overrides)
+    {
+        if (ov.Start == start && ov.End == end)
+        {
+            ov.Data = std::move(data);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CartCommon::ClearROMOverride(u32 start, u32 end)
+{
+    std::lock_guard<std::mutex> lk(OverrideMutex);
+    for (auto it = Overrides.begin(); it != Overrides.end(); ++it)
+    {
+        if (it->Start == start && it->End == end)
+        {
+            Overrides.erase(it);
+            OverrideActive.store(!Overrides.empty(), std::memory_order_release);
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<ROMOverrideInfo> CartCommon::GetROMOverrides() const
+{
+    std::lock_guard<std::mutex> lk(OverrideMutex);
+    std::vector<ROMOverrideInfo> out;
+    out.reserve(Overrides.size());
+    for (const auto& ov : Overrides)
+        out.push_back({ov.Start, ov.End, ov.HostPath, (u64)ov.Data.size(), ov.Hits, ov.Bytes});
+    return out;
+}
+
+bool CartCommon::GetROMOverrideStats(u32 start, u32 end, u64& hits, u64& bytes) const
+{
+    std::lock_guard<std::mutex> lk(OverrideMutex);
+    for (const auto& ov : Overrides)
+    {
+        if (ov.Start == start && ov.End == end)
+        {
+            hits = ov.Hits;
+            bytes = ov.Bytes;
+            return true;
+        }
+    }
+    return false;
+}
+
 
 void CartCommon::ROMCommandStart(NDSCartSlot& cartslot, const u8* cmd)
 {
