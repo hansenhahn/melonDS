@@ -408,7 +408,23 @@ StubState GdbStub::Poll(bool wait)
 	case ReadResult::Break:
 		return StubState::Break;
 	case ReadResult::Wut:
+	{
 		Log(LogLevel::Info, "[GDB] WUT\n");
+		// A stray byte must not tear down the connection. Resync to the next
+		// packet start (or clear the buffer) and keep the session alive.
+		size_t k = 0;
+		while (k < RecvBufferFilled && RecvBuffer[k] != '$') ++k;
+		if (k >= RecvBufferFilled)
+		{
+			RecvBufferFilled = 0;
+		}
+		else if (k > 0)
+		{
+			memmove(&RecvBuffer[0], &RecvBuffer[k], RecvBufferFilled - k);
+			RecvBufferFilled -= k;
+		}
+		return StubState::None;
+	}
 	case_gdbp_eof:
 	case ReadResult::Eof:
 		Log(LogLevel::Info, "[GDB] EOF!\n");
@@ -545,6 +561,12 @@ StubState GdbStub::Enter(bool stay, TgtStatus stat, u32 arg, bool wait_for_conn)
 		case StubState::Disconnect:
 			Log(LogLevel::Info, "[GDB] disconnect\n");
 			SignalStatus(TgtStatus::None, ~(u32)0);
+			Disconnect();
+			do_next = false;
+			break;
+		case StubState::NoConn:
+			// No client to wait for: return instead of busy-spinning with
+			// stay=true after a detach/disconnect (this used to wedge the stub).
 			do_next = false;
 			break;
 		default: break;
