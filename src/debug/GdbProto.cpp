@@ -65,10 +65,11 @@ Gdb::ReadResult GdbStub::TryParsePacket(size_t start, size_t& packetStart, size_
 		{
 			packetStart = i;
 			uint8_t checksumGot = 0;
+			bool escaped = false;
 			while (i < RecvBufferFilled)
 			{
 				curChar = RecvBuffer[i];
-				if (curChar == '#' && i + 2 < RecvBufferFilled)
+				if (!escaped && curChar == '#' && i + 2 < RecvBufferFilled)
 				{
 					u8 checksumShould = (hex2nyb(RecvBuffer[i+1]) << 4)
 						| hex2nyb(RecvBuffer[i+2]);
@@ -84,11 +85,11 @@ Gdb::ReadResult GdbStub::TryParsePacket(size_t start, size_t& packetStart, size_
 					packetSize = packetContentSize + 3;
 					return ReadResult::CmdRecvd;
 				}
-				else
-				{
-					checksumGot += curChar;
-				}
 
+				// '#' inside a binary payload is escaped as "}#": do not treat it
+				// as the packet terminator.
+				checksumGot += curChar;
+				escaped = (!escaped && curChar == '}');
 				i++;
 			}
 		}

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
+#include <vector>
 
 #include "../CRC32.h"
 #include "../Platform.h"
@@ -363,7 +364,24 @@ ExecResult GdbStub::Handle_X(GdbStub* stub, const u8* cmd, ssize_t len)
 	}
 	end = addr + llen;
 
-	const u8* dataptr = cmd + inoff;
+	// GDB escapes '#', '$', '}' and '*' in binary payloads as '}' followed by
+	// the byte XOR 0x20. Decode it before writing.
+	std::vector<u8> decoded;
+	decoded.reserve((size_t)llen);
+	for (ssize_t i = inoff; i < len && decoded.size() < (size_t)llen; )
+	{
+		u8 c = cmd[i++];
+		if (c == '}' && i < len)
+			c = cmd[i++] ^ 0x20;
+		decoded.push_back(c);
+	}
+	if (decoded.size() != (size_t)llen)
+	{
+		stub->RespStr("E01");
+		return ExecResult::Ok;
+	}
+
+	const u8* dataptr = decoded.data();
 
 	// pre-align: byte
 	if ((addr & 1))
@@ -422,7 +440,7 @@ ExecResult GdbStub::Handle_X(GdbStub* stub, const u8* cmd, ssize_t len)
 	// post-align: byte
 	if ((end-addr) == 1)
 	{
-		u8 v = unhex8(dataptr);
+		u8 v = *dataptr;
 		stub->Cb->WriteMem(addr, 8, v);
 		++addr;
 		dataptr += 1;
