@@ -19,6 +19,7 @@
 #ifndef NDS_H
 #define NDS_H
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <optional>
@@ -462,6 +463,12 @@ public: // TODO: Encapsulate the rest of these members
     // Optional hook for the DMA transfer trace. Called on the emulation thread at the
     // start of each DMA transfer with (cpu, channel, src, dst, cnt, programmer pc).
     std::function<void(u32 cpu, u32 num, u32 src, u32 dst, u32 cnt, u32 pc)> OnDmaTransfer;
+
+    // Optional hook for the CPU write trace. Called on the emulation thread for each
+    // data write with (cpu, address, value, width in bytes, pc). The active flag keeps
+    // the per-write cost to one atomic load when no trace is running.
+    std::function<void(u32 cpu, u32 addr, u32 val, u32 width, u32 pc)> OnCpuWrite;
+    std::atomic<bool> CpuWriteTraceActive {false};
 
     // Called at the end of GPU3D::VBlank, after RenderPolygonRAM is finalized.
     // Used for a one-shot 3D snapshot (no cost when unset).

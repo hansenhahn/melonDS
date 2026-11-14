@@ -118,6 +118,12 @@ private:
         int dmaBatch = 256;
         int dmaTimeoutMs = 100;
         int dmaEventFd = -1;
+
+        // CPU RAM write trace subscription
+        bool ramTrace = false;
+        int ramBatch = 256;
+        int ramTimeoutMs = 100;
+        int ramEventFd = -1;
     };
 
     struct CartRead
@@ -134,6 +140,15 @@ private:
         uint32_t src;
         uint32_t dst;
         uint32_t cnt;
+        uint32_t pc;
+    };
+
+    struct RamWriteEvent
+    {
+        uint32_t cpu;
+        uint32_t addr;
+        uint32_t val;
+        uint32_t width;
         uint32_t pc;
     };
 
@@ -220,6 +235,13 @@ private:
     void flushDma(Client* client);
     void stopDmaTrace(Client* client);
 
+    // CPU RAM write trace: called on the emu thread for each data write.
+    void onCpuWrite(uint32_t cpu, uint32_t addr, uint32_t val, uint32_t width,
+                    uint32_t pc);
+    // Drains the trace buffer and sends a batch (event.ram) to the client.
+    void flushRam(Client* client);
+    void stopRamTrace(Client* client);
+
     // 3D snapshot: captured at the next VBlank (one-shot, on demand).
     void onVBlank();
     bool requestSnapshot(Gpu3DSnapshot& out, int timeoutMs = 2000);
@@ -277,6 +299,15 @@ private:
     bool dmaActive;
     int dmaBatchN;
     int dmaEventFd;
+
+    // CPU RAM write trace (single subscriber at a time)
+    std::mutex ramMutex;
+    TraceRing<RamWriteEvent> ramRing;
+    bool ramActive;
+    int ramBatchN;
+    int ramEventFd;
+    std::atomic<uint32_t> ramLo {0};
+    std::atomic<uint32_t> ramHi {0};
 
     // 3D snapshot (one-shot at VBlank)
     std::mutex snapshotMutex;

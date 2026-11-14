@@ -69,7 +69,8 @@ static Gdb::GdbStub* GetHitStub(melonDS::NDS* nds, const std::string& core)
 ControlServer::ControlServer(EmuInstance* inst) : instance(inst), listenFd(-1), running(false),
     captureRequested(false), captureDone(false), captureValid(false), captureScreens(2),
     cartActive(false), cartBatchN(256), cartEventFd(-1),
-    dmaActive(false), dmaBatchN(256), dmaEventFd(-1), gxActive(false),
+    dmaActive(false), dmaBatchN(256), dmaEventFd(-1),
+    ramActive(false), ramBatchN(256), ramEventFd(-1), gxActive(false),
     originActive(false), logTraffic(false)
 {
 }
@@ -332,6 +333,8 @@ void ControlServer::stop()
         nds->OnVBlank = nullptr;
         nds->OnGXCommand = nullptr;
         nds->OnDmaTransfer = nullptr;
+        nds->CpuWriteTraceActive.store(false, std::memory_order_release);
+        nds->OnCpuWrite = nullptr;
     }
     {
         std::lock_guard<std::mutex> lk(snapshotMutex);
@@ -340,6 +343,10 @@ void ControlServer::stop()
     {
         std::lock_guard<std::mutex> lk(originMutex);
         originActive = false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(ramMutex);
+        ramActive = false;
     }
 
     if (!socketPath.empty()) unlink(socketPath.c_str());
@@ -387,10 +394,15 @@ void ControlServer::clientLoop(Client* client)
             int t = client->dmaTimeoutMs;
             timeout = (timeout < 0 || t < timeout) ? t : timeout;
         }
+        if (client->ramTrace)
+        {
+            int t = client->ramTimeoutMs;
+            timeout = (timeout < 0 || t < timeout) ? t : timeout;
+        }
 
-        struct pollfd pfds[3];
+        struct pollfd pfds[4];
         int nfds = 1;
-        int cartIdx = -1, dmaIdx = -1;
+        int cartIdx = -1, dmaIdx = -1, ramIdx = -1;
         pfds[0] = {fd, POLLIN, 0};
         if (client->cartTrace && client->cartEventFd >= 0)
         {
@@ -401,6 +413,11 @@ void ControlServer::clientLoop(Client* client)
         {
             dmaIdx = nfds;
             pfds[nfds++] = {client->dmaEventFd, POLLIN, 0};
+        }
+        if (client->ramTrace && client->ramEventFd >= 0)
+        {
+            ramIdx = nfds;
+            pfds[nfds++] = {client->ramEventFd, POLLIN, 0};
         }
 
         int pr = poll(pfds, nfds, timeout);
@@ -415,6 +432,7 @@ void ControlServer::clientLoop(Client* client)
             if (client->streaming) sendStreamSample(client);
             if (client->cartTrace) flushCart(client);
             if (client->dmaTrace) flushDma(client);
+            if (client->ramTrace) flushRam(client);
             continue;
         }
 
@@ -434,6 +452,15 @@ void ControlServer::clientLoop(Client* client)
             ssize_t r = read(client->dmaEventFd, &v, sizeof(v));
             (void)r;
             flushDma(client);
+        }
+
+        // CPU RAM write batch signal
+        if (ramIdx >= 0 && (pfds[ramIdx].revents & POLLIN))
+        {
+            uint64_t v;
+            ssize_t r = read(client->ramEventFd, &v, sizeof(v));
+            (void)r;
+            flushRam(client);
         }
 
         if (!(pfds[0].revents & POLLIN)) continue;
@@ -464,6 +491,7 @@ void ControlServer::clientLoop(Client* client)
 
     stopCartTrace(client);
     stopDmaTrace(client);
+    stopRamTrace(client);
 
     {
         std::lock_guard<std::mutex> lock(clientsMutex);
@@ -671,6 +699,71 @@ void ControlServer::stopDmaTrace(Client* client)
         client->dmaEventFd = -1;
     }
     client->dmaTrace = false;
+}
+
+// Runs on the emu thread. Records CPU data writes inside the active range.
+void ControlServer::onCpuWrite(uint32_t cpu, uint32_t addr, uint32_t val,
+                               uint32_t width, uint32_t pc)
+{
+    const uint32_t lo = ramLo.load(std::memory_order_relaxed);
+    const uint32_t hi = ramHi.load(std::memory_order_relaxed);
+    if (addr < lo || addr >= hi) return;
+
+    std::lock_guard<std::mutex> lk(ramMutex);
+    if (!ramActive) return;
+    ramRing.push({cpu, addr, val, width, pc});
+    if ((int)ramRing.size() >= ramBatchN && ramEventFd >= 0)
+    {
+        uint64_t one = 1;
+        ssize_t r = write(ramEventFd, &one, sizeof(one));
+        (void)r;
+    }
+}
+
+// Runs on the subscriber's client thread. Drains the buffer and sends a batch.
+void ControlServer::flushRam(Client* client)
+{
+    std::vector<RamWriteEvent> batch;
+    uint64_t dropped;
+    {
+        std::lock_guard<std::mutex> lk(ramMutex);
+        ramRing.drain(batch);
+        dropped = ramRing.dropped;
+        ramRing.dropped = 0;
+    }
+    if (batch.empty() && !dropped) return;
+
+    json writes = json::array();
+    for (const RamWriteEvent& w : batch)
+        writes.push_back({{"cpu", w.cpu}, {"addr", w.addr}, {"val", w.val},
+                          {"width", w.width}, {"pc", w.pc}});
+
+    json note = {{"jsonrpc", "2.0"}, {"method", "event.ram"},
+                 {"params", {{"writes", writes}, {"count", batch.size()},
+                             {"dropped", dropped}}}};
+    sendMessage(client, note.dump());
+}
+
+void ControlServer::stopRamTrace(Client* client)
+{
+    if (!client->ramTrace) return;
+
+    melonDS::NDS* nds = instance->getNDS();
+    if (nds)
+        nds->CpuWriteTraceActive.store(false, std::memory_order_release);
+
+    {
+        std::lock_guard<std::mutex> lk(ramMutex);
+        ramActive = false;
+        ramEventFd = -1;
+        ramRing.reset(0);
+    }
+    if (client->ramEventFd >= 0)
+    {
+        close(client->ramEventFd);
+        client->ramEventFd = -1;
+    }
+    client->ramTrace = false;
 }
 
 // Runs on the emu thread at the end of VBlank, after RenderPolygonRAM was
@@ -1766,6 +1859,58 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
         return ok({{"ok", true}});
     }
 
+    if (method == "ram.write_trace.start")
+    {
+        if (!nds) return fail(-32000, "emulator not running");
+
+        const int64_t start = params.value("start", (int64_t)-1);
+        const int64_t end = params.value("end", (int64_t)-1);
+        if (start < 0 || end <= start || end > 0xFFFFFFFFLL)
+            return fail(-32602, "invalid address range");
+
+        int batch = params.value("batch", 256);
+        if (batch < 1) batch = 1;
+        int timeoutMs = params.value("timeout_ms", 100);
+        if (timeoutMs < 1) timeoutMs = 1;
+        int maxItems = params.value("max_items", TRACE_RING_CAP);
+        if (maxItems < 1) maxItems = 1;
+        if (maxItems > (1 << 22)) maxItems = 1 << 22;
+
+        {
+            std::lock_guard<std::mutex> lk(ramMutex);
+            if (ramActive) return fail(-32000, "RAM write trace already active");
+            ramLo.store((uint32_t)start, std::memory_order_relaxed);
+            ramHi.store((uint32_t)end, std::memory_order_relaxed);
+            ramActive = true;
+            ramBatchN = batch;
+            ramRing.reset(maxItems);
+        }
+
+        client->ramTrace = true;
+        client->ramBatch = batch;
+        client->ramTimeoutMs = timeoutMs;
+        client->ramEventFd = eventfd(0, EFD_NONBLOCK);
+        {
+            std::lock_guard<std::mutex> lk(ramMutex);
+            ramEventFd = client->ramEventFd;
+        }
+
+        nds->OnCpuWrite = [this](uint32_t cpu, uint32_t addr, uint32_t val,
+                                 uint32_t width, uint32_t pc) {
+            onCpuWrite(cpu, addr, val, width, pc);
+        };
+        nds->CpuWriteTraceActive.store(true, std::memory_order_release);
+        return ok({{"ok", true}, {"start", start}, {"end", end},
+                   {"batch", batch}, {"timeout_ms", timeoutMs},
+                   {"max_items", maxItems}});
+    }
+    if (method == "ram.write_trace.stop")
+    {
+        if (!client->ramTrace) return fail(-32000, "no RAM write trace active");
+        stopRamTrace(client);
+        return ok({{"ok", true}});
+    }
+
     if (method == "3d.state")
     {
         Gpu3DSnapshot s;
@@ -2122,6 +2267,9 @@ void ControlServer::stopCartTrace(Client*) {}
 void ControlServer::onDmaTransfer(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
 void ControlServer::flushDma(Client*) {}
 void ControlServer::stopDmaTrace(Client*) {}
+void ControlServer::onCpuWrite(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
+void ControlServer::flushRam(Client*) {}
+void ControlServer::stopRamTrace(Client*) {}
 void ControlServer::onVBlank() {}
 bool ControlServer::requestSnapshot(Gpu3DSnapshot&, int) { return false; }
 bool ControlServer::snapshotForRequest(const std::string&, Gpu3DSnapshot&, std::string& err)
