@@ -944,6 +944,8 @@ void ARMv5Impl<mode>::DataWrite8(u32 addr, u8 val)
     DataRegion = addr;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
         GdbCheckD(addr, Gdb::WatchptKind::Write, 1, R[15] - ((CPSR & 0x20) ? 2 : 4));
+    if (NDS.CpuWriteTraceActive.load(std::memory_order_acquire) && NDS.OnCpuWrite)
+        NDS.OnCpuWrite(Num, addr, val, 1, R[15] - ((CPSR & 0x20) ? 2 : 4));
 
     if (addr < ITCMSize)
     {
@@ -977,6 +979,8 @@ void ARMv5Impl<mode>::DataWrite16(u32 addr, u16 val)
     addr &= ~1;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
         GdbCheckD(addr, Gdb::WatchptKind::Write, 2, R[15] - ((CPSR & 0x20) ? 2 : 4));
+    if (NDS.CpuWriteTraceActive.load(std::memory_order_acquire) && NDS.OnCpuWrite)
+        NDS.OnCpuWrite(Num, addr, val, 2, R[15] - ((CPSR & 0x20) ? 2 : 4));
 
     if (addr < ITCMSize)
     {
@@ -1010,6 +1014,8 @@ void ARMv5Impl<mode>::DataWrite32(u32 addr, u32 val)
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
         GdbCheckD(addr, Gdb::WatchptKind::Write, 4, R[15] - ((CPSR & 0x20) ? 2 : 4));
+    if (NDS.CpuWriteTraceActive.load(std::memory_order_acquire) && NDS.OnCpuWrite)
+        NDS.OnCpuWrite(Num, addr, val, 4, R[15] - ((CPSR & 0x20) ? 2 : 4));
 
     if (addr < ITCMSize)
     {
@@ -1035,6 +1041,8 @@ void ARMv5Impl<mode>::DataWrite32S(u32 addr, u32 val)
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
         GdbCheckD(addr, Gdb::WatchptKind::Write, 4, R[15] - ((CPSR & 0x20) ? 2 : 4));
+    if (NDS.CpuWriteTraceActive.load(std::memory_order_acquire) && NDS.OnCpuWrite)
+        NDS.OnCpuWrite(Num, addr, val, 4, R[15] - ((CPSR & 0x20) ? 2 : 4));
 
     if (addr < ITCMSize)
     {
