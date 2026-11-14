@@ -1876,11 +1876,11 @@ bool ControlServer::handleRequest(Client* client, const std::string& body)
         if (maxItems < 1) maxItems = 1;
         if (maxItems > (1 << 22)) maxItems = 1 << 22;
 
-        ramLo.store((uint32_t)start, std::memory_order_relaxed);
-        ramHi.store((uint32_t)end, std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lk(ramMutex);
             if (ramActive) return fail(-32000, "RAM write trace already active");
+            ramLo.store((uint32_t)start, std::memory_order_relaxed);
+            ramHi.store((uint32_t)end, std::memory_order_relaxed);
             ramActive = true;
             ramBatchN = batch;
             ramRing.reset(maxItems);
