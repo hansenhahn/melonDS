@@ -203,6 +203,9 @@ private:
 	Gdb::ReadResult TryParsePacket(size_t start, size_t& packetStart, size_t& packetSize, size_t& packetContentSize);
 	Gdb::ReadResult ParseAndSetupPacket();	
 
+	// Finishes accepting a new client: initial ack, ack back and per-session reset.
+	StubState SetupConnection(int fd);
+
 	void SetupCommand(size_t packetStart, size_t packetSize);
 
 	int SendAck();
