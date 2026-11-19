@@ -291,6 +291,36 @@ StubState GdbStub::HandlePacket()
 	}
 }
 
+StubState GdbStub::SetupConnection(int fd)
+{
+	ConnFd = fd;
+
+	u8 a;
+	if (WaitAckBlocking(&a, 1000) < 0)
+	{
+		Log(LogLevel::Error, "[GDB] inital handshake: didn't receive inital ack!\n");
+		closesocket(ConnFd);
+		ConnFd = 0;
+		return StubState::Disconnect;
+	}
+
+	if (a != '+')
+	{
+		Log(LogLevel::Error, "[GDB] inital handshake: unexpected character '%c'!\n", a);
+	}
+	SendAck();
+
+	Stat = TgtStatus::Running; // on connected
+	StatFlag = false;
+	// reset per-connection state so a new gdb session starts clean
+	// (otherwise 'QStartNoAckMode' from a previous session leaks as NoAck=true
+	//  and desyncs the next client -> "Packet instead of Ack")
+	NoAck = false;
+	RecvBufferFilled = 0;
+	Cmdlen = 0;
+	return StubState::None;
+}
+
 StubState GdbStub::Poll(bool wait)
 {
 	int r;
@@ -316,29 +346,8 @@ StubState GdbStub::Poll(bool wait)
 
 		if (ConnFd < 0) return StubState::NoConn;
 
-		u8 a;
-		if (WaitAckBlocking(&a, 1000) < 0)
-		{
-			Log(LogLevel::Error, "[GDB] inital handshake: didn't receive inital ack!\n");
-			closesocket(ConnFd);
-			ConnFd = 0;
-			return StubState::Disconnect;
-		}
-
-		if (a != '+')
-		{
-			Log(LogLevel::Error, "[GDB] inital handshake: unexpected character '%c'!\n", a);
-		}
-		SendAck();
-
-		Stat = TgtStatus::Running; // on connected
-		StatFlag = false;
-		// reset per-connection state so a new gdb session starts clean
-		// (otherwise 'QStartNoAckMode' from a previous session leaks as NoAck=true
-		//  and desyncs the next client -> "Packet instead of Ack")
-		NoAck = false;
-		RecvBufferFilled = 0;
-		Cmdlen = 0;
+		StubState conn = SetupConnection(ConnFd);
+		if (conn != StubState::None) return conn;
 	}
 
 	if (StatFlag)
@@ -353,16 +362,47 @@ StubState GdbStub::Poll(bool wait)
 	// nothing...
 #else
 #ifndef _WIN32
-	struct pollfd pfd;
-	pfd.fd = ConnFd;
-	pfd.events = POLLIN;
-	pfd.revents = 0;
+	struct pollfd pfds[2];
+	pfds[0].fd = ConnFd;
+	pfds[0].events = POLLIN;
+	pfds[0].revents = 0;
+	int nfds = 1;
+	// While a client is connected, also watch the listening socket: a new
+	// connection means the current one is stale (e.g. killed debugger) and
+	// must be replaced instead of wedging the stub on a half-closed socket.
+	if (SockFd > 0)
+	{
+		pfds[1].fd = SockFd;
+		pfds[1].events = POLLIN;
+		pfds[1].revents = 0;
+		nfds = 2;
+	}
 
-	r = poll(&pfd, 1, wait ? -1 : 0);
+	r = poll(pfds, nfds, wait ? -1 : 0);
 
 	if (r == 0) return StubState::None; // nothing is happening
 
-	if (pfd.revents & (POLLHUP|POLLERR|POLLNVAL))
+	if (nfds == 2 && (pfds[1].revents & POLLIN))
+	{
+		struct sockaddr_in* client = (struct sockaddr_in*)ClientSA;
+		socklen_t len = sizeof(*client);
+#ifdef __linux__
+		int newFd = accept4(SockFd, (struct sockaddr*)client, &len, /*SOCK_NONBLOCK|*/SOCK_CLOEXEC);
+#else
+		int newFd = accept(SockFd, (struct sockaddr*)client, &len);
+#endif
+		if (newFd >= 0)
+		{
+			Log(LogLevel::Info, "[GDB] replacing stale connection\n");
+			closesocket(ConnFd);
+			ConnFd = 0;
+			StubState conn = SetupConnection(newFd);
+			if (conn != StubState::None) return conn;
+			return StubState::None;
+		}
+	}
+
+	if (pfds[0].revents & (POLLHUP|POLLERR|POLLNVAL))
 	{
 		// oopsie, something happened
 		Disconnect();
